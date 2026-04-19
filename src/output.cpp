@@ -562,6 +562,19 @@ void process_outputs(channel_t* channel, int cur_scan_freq) {
         } else if (channel->outputs[k].type == O_MIXER) {
             mixer_data* mdata = (mixer_data*)(channel->outputs[k].data);
             mixer_put_samples(mdata->mixer, mdata->input, channel->waveout, channel->axcindicate != NO_SIGNAL, WAVE_BATCH);
+        } else if (channel->outputs[k].type == O_SCAN_META_UDP) {
+            scan_meta_udp_data* sdata = (scan_meta_udp_data*)channel->outputs[k].data;
+            int meta_freq_idx = -1;
+            if (cur_scan_freq >= 0 && cur_scan_freq < channel->freq_count) {
+                meta_freq_idx = cur_scan_freq;
+            } else if (sdata->continuous) {
+                meta_freq_idx = channel->freq_idx;
+            }
+
+            if (meta_freq_idx >= 0 && meta_freq_idx < channel->freq_count) {
+                struct freq_t const* fparms = channel->freqlist + meta_freq_idx;
+                scan_meta_udp_write(sdata, -1, fparms->frequency, fparms->label, channel->axcindicate != NO_SIGNAL);
+            }
         } else if (channel->outputs[k].type == O_UDP_STREAM) {
             udp_stream_data* sdata = (udp_stream_data*)channel->outputs[k].data;
 
@@ -604,6 +617,9 @@ void disable_channel_outputs(channel_t* channel) {
         } else if (output->type == O_MIXER) {
             mixer_data* mdata = (mixer_data*)(output->data);
             mixer_disable_input(mdata->mixer, mdata->input);
+        } else if (output->type == O_SCAN_META_UDP) {
+            scan_meta_udp_data* sdata = (scan_meta_udp_data*)output->data;
+            scan_meta_udp_shutdown(sdata);
         } else if (output->type == O_UDP_STREAM) {
             udp_stream_data* sdata = (udp_stream_data*)output->data;
             udp_stream_shutdown(sdata);
@@ -988,6 +1004,14 @@ void* output_check_thread(void*) {
 
                         if (dev->input->state == INPUT_FAILED) {
                             udp_stream_shutdown(sdata);
+                        }
+                    } else if (dev->channels[j].outputs[k].type == O_SCAN_META_UDP) {
+                        scan_meta_udp_data* sdata = (scan_meta_udp_data*)dev->channels[j].outputs[k].data;
+
+                        if (dev->input->state == INPUT_FAILED) {
+                            scan_meta_udp_shutdown(sdata);
+                        } else if (dev->input->state == INPUT_RUNNING && sdata->send_socket == -1) {
+                            scan_meta_udp_init(sdata);
                         }
 #ifdef WITH_PULSEAUDIO
                     } else if (dev->channels[j].outputs[k].type == O_PULSE) {

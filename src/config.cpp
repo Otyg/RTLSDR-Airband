@@ -192,7 +192,37 @@ static int parse_outputs(libconfig::Setting& outs, channel_t* channel, int i, in
                 error();
             }
             debug_print("dev[%d].chan[%d].out[%d] connected to mixer %s as input %d (ampfactor=%.1f balance=%.1f)\n", i, j, o, name, mdata->input, ampfactor, balance);
-        } else if (!strncmp(outs[o]["type"], "udp_stream", 6)) {
+        } else if (!strncmp(outs[o]["type"], "scan_meta_udp", 13)) {
+            if (parsing_mixers) {
+                cerr << "Configuration error: mixers.[" << i << "] outputs.[" << o << "]: scan_meta_udp output is not allowed for mixers\n";
+                error();
+            }
+            channel->outputs[oo].data = XCALLOC(1, sizeof(struct scan_meta_udp_data));
+            channel->outputs[oo].type = O_SCAN_META_UDP;
+
+            scan_meta_udp_data* sdata = (scan_meta_udp_data*)channel->outputs[oo].data;
+            sdata->continuous = outs[o].exists("continuous") ? (bool)(outs[o]["continuous"]) : false;
+
+            if (outs[o].exists("dest_address")) {
+                sdata->dest_address = strdup(outs[o]["dest_address"]);
+            } else {
+                cerr << "Configuration error: devices.[" << i << "] channels.[" << j << "] outputs.[" << o << "]: missing dest_address\n";
+                error();
+            }
+
+            if (outs[o].exists("dest_port")) {
+                if (outs[o]["dest_port"].getType() == libconfig::Setting::TypeInt) {
+                    char buffer[12];
+                    sprintf(buffer, "%d", (int)outs[o]["dest_port"]);
+                    sdata->dest_port = strdup(buffer);
+                } else {
+                    sdata->dest_port = strdup(outs[o]["dest_port"]);
+                }
+            } else {
+                cerr << "Configuration error: devices.[" << i << "] channels.[" << j << "] outputs.[" << o << "]: missing dest_port\n";
+                error();
+            }
+        } else if (!strncmp(outs[o]["type"], "udp_stream", 10)) {
             channel->outputs[oo].data = XCALLOC(1, sizeof(struct udp_stream_data));
             channel->outputs[oo].type = O_UDP_STREAM;
 

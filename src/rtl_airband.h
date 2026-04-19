@@ -106,6 +106,7 @@ enum output_type {
     O_FILE,
     O_RAWFILE,
     O_MIXER,
+    O_SCAN_META_UDP,
     O_UDP_STREAM
 #ifdef WITH_PULSEAUDIO
     ,
@@ -154,6 +155,16 @@ struct udp_stream_data {
     const char* dest_address;
     const char* dest_port;
 
+    int send_socket;
+    struct sockaddr dest_sockaddr;
+    socklen_t dest_sockaddr_len;
+};
+
+struct scan_meta_udp_data {
+    bool continuous;
+    const char* dest_address;
+    const char* dest_port;
+    uint32_t seq;
     int send_socket;
     struct sockaddr dest_sockaddr;
     socklen_t dest_sockaddr_len;
@@ -393,6 +404,11 @@ bool udp_stream_init(udp_stream_data* sdata, mix_modes mode, size_t len);
 void udp_stream_write(udp_stream_data* sdata, const float* data, size_t len);
 void udp_stream_write(udp_stream_data* sdata, const float* data_left, const float* data_right, size_t len);
 void udp_stream_shutdown(udp_stream_data* sdata);
+
+// scan_meta_udp.cpp
+bool scan_meta_udp_init(scan_meta_udp_data* sdata);
+void scan_meta_udp_write(scan_meta_udp_data* sdata, int device_idx, int freq_hz, char const* label, bool squelch_open);
+void scan_meta_udp_shutdown(scan_meta_udp_data* sdata);
 
 #ifdef WITH_PULSEAUDIO
 #define PULSE_STREAM_LATENCY_LIMIT 10000000UL

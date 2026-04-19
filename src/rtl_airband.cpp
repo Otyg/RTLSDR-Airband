@@ -272,6 +272,11 @@ bool init_output(channel_t* channel, output_t* output) {
     }
     if (output->type == O_ICECAST) {
         shout_setup((icecast_data*)(output->data), channel->mode);
+    } else if (output->type == O_SCAN_META_UDP) {
+        scan_meta_udp_data* sdata = (scan_meta_udp_data*)(output->data);
+        if (!scan_meta_udp_init(sdata)) {
+            return false;
+        }
     } else if (output->type == O_UDP_STREAM) {
         udp_stream_data* sdata = (udp_stream_data*)(output->data);
         if (!udp_stream_init(sdata, channel->mode, (size_t)WAVE_BATCH * sizeof(float))) {

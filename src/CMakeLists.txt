@@ -293,6 +293,7 @@ add_library (rtl_airband_base OBJECT
 	ctcss.cpp
 	util.cpp
 	udp_stream.cpp
+	scan_meta_udp.cpp
 	logging.cpp
 	filters.cpp
 	helper_functions.cpp
