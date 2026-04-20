@@ -4,25 +4,27 @@
 #include <QByteArray>
 #include <QObject>
 #include <QString>
-#include <QUdpSocket>
+#include <QTcpSocket>
 
 class AudioReceiver : public QObject {
     Q_OBJECT
 
    public:
     explicit AudioReceiver(QObject* parent = nullptr);
-    bool bind(quint16 port);
+    bool connectToHost(QString const& host, quint16 port, int timeoutMs = 3000);
     void close();
 
    signals:
-    void audioDatagram(QByteArray data);
+    void audioChunk(QByteArray data);
     void errorMessage(QString message);
 
    private slots:
     void onReadyRead();
+    void onSocketError(QAbstractSocket::SocketError socketError);
 
    private:
-    QUdpSocket socket_;
+    QTcpSocket socket_;
+    QByteArray pending_;
 };
 
 #endif

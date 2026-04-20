@@ -104,5 +104,6 @@ void udp_stream_write(udp_stream_data* sdata, const float* data_left, const floa
 void udp_stream_shutdown(udp_stream_data* sdata) {
     if (sdata->send_socket != -1) {
         close(sdata->send_socket);
+        sdata->send_socket = -1;
     }
 }

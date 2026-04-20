@@ -5,6 +5,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QSlider>
 #include <QSpinBox>
@@ -18,14 +19,17 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     QGroupBox* networkGroup = new QGroupBox("Network", central);
     QFormLayout* networkLayout = new QFormLayout(networkGroup);
+    backendHost_ = new QLineEdit(networkGroup);
+    backendHost_->setText("127.0.0.1");
     audioPort_ = new QSpinBox(networkGroup);
     audioPort_->setRange(1, 65535);
     audioPort_->setValue(9000);
     metadataPort_ = new QSpinBox(networkGroup);
     metadataPort_->setRange(1, 65535);
     metadataPort_->setValue(9001);
-    networkLayout->addRow("Audio UDP port", audioPort_);
-    networkLayout->addRow("Metadata UDP port", metadataPort_);
+    networkLayout->addRow("Backend host", backendHost_);
+    networkLayout->addRow("Audio TCP port", audioPort_);
+    networkLayout->addRow("Metadata TCP port", metadataPort_);
 
     QGroupBox* audioGroup = new QGroupBox("Audio", central);
     QFormLayout* audioLayout = new QFormLayout(audioGroup);
@@ -75,7 +79,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         audioEngine_.setVolume(static_cast<float>(v) / 100.0f);
     });
 
-    connect(&audioReceiver_, &AudioReceiver::audioDatagram, &audioEngine_, &AudioEngine::pushFloat32Mono);
+    connect(&audioReceiver_, &AudioReceiver::audioChunk, &audioEngine_, &AudioEngine::pushFloat32Mono);
     connect(&metadataReceiver_, &MetadataReceiver::metadataReceived, this, &MainWindow::onMetadata);
 
     connect(&audioReceiver_, &AudioReceiver::errorMessage, this, &MainWindow::onError);
@@ -88,11 +92,18 @@ void MainWindow::startListening() {
         return;
     }
 
-    if (!audioReceiver_.bind(static_cast<quint16>(audioPort_->value()))) {
+    QString const host = backendHost_->text().trimmed();
+    if (host.isEmpty()) {
+        statusBar()->showMessage("Backend host must not be empty");
         audioEngine_.stop();
         return;
     }
-    if (!metadataReceiver_.bind(static_cast<quint16>(metadataPort_->value()))) {
+
+    if (!audioReceiver_.connectToHost(host, static_cast<quint16>(audioPort_->value()))) {
+        audioEngine_.stop();
+        return;
+    }
+    if (!metadataReceiver_.connectToHost(host, static_cast<quint16>(metadataPort_->value()))) {
         audioReceiver_.close();
         audioEngine_.stop();
         return;
@@ -101,7 +112,7 @@ void MainWindow::startListening() {
     startButton_->setEnabled(false);
     stopButton_->setEnabled(true);
     setStatus("Listening");
-    statusBar()->showMessage("Listening for audio and metadata streams");
+    statusBar()->showMessage(QString("Connected to %1").arg(host));
 }
 
 void MainWindow::stopListening() {

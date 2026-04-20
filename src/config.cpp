@@ -222,6 +222,38 @@ static int parse_outputs(libconfig::Setting& outs, channel_t* channel, int i, in
                 cerr << "Configuration error: devices.[" << i << "] channels.[" << j << "] outputs.[" << o << "]: missing dest_port\n";
                 error();
             }
+        } else if (!strncmp(outs[o]["type"], "scan_meta_tcp_server", 20)) {
+            if (parsing_mixers) {
+                cerr << "Configuration error: mixers.[" << i << "] outputs.[" << o << "]: scan_meta_tcp_server output is not allowed for mixers\n";
+                error();
+            }
+            channel->outputs[oo].data = XCALLOC(1, sizeof(struct scan_meta_tcp_server_data));
+            channel->outputs[oo].type = O_SCAN_META_TCP_SERVER;
+
+            scan_meta_tcp_server_data* sdata = (scan_meta_tcp_server_data*)channel->outputs[oo].data;
+            sdata->continuous = outs[o].exists("continuous") ? (bool)(outs[o]["continuous"]) : false;
+            sdata->bind_address = outs[o].exists("bind_address") ? strdup(outs[o]["bind_address"]) : strdup("0.0.0.0");
+
+            if (outs[o].exists("bind_port")) {
+                if (outs[o]["bind_port"].getType() == libconfig::Setting::TypeInt) {
+                    char buffer[12];
+                    sprintf(buffer, "%d", (int)outs[o]["bind_port"]);
+                    sdata->bind_port = strdup(buffer);
+                } else {
+                    sdata->bind_port = strdup(outs[o]["bind_port"]);
+                }
+            } else if (outs[o].exists("dest_port")) {
+                if (outs[o]["dest_port"].getType() == libconfig::Setting::TypeInt) {
+                    char buffer[12];
+                    sprintf(buffer, "%d", (int)outs[o]["dest_port"]);
+                    sdata->bind_port = strdup(buffer);
+                } else {
+                    sdata->bind_port = strdup(outs[o]["dest_port"]);
+                }
+            } else {
+                cerr << "Configuration error: devices.[" << i << "] channels.[" << j << "] outputs.[" << o << "]: missing bind_port\n";
+                error();
+            }
         } else if (!strncmp(outs[o]["type"], "udp_stream", 10)) {
             channel->outputs[oo].data = XCALLOC(1, sizeof(struct udp_stream_data));
             channel->outputs[oo].type = O_UDP_STREAM;
@@ -257,6 +289,39 @@ static int parse_outputs(libconfig::Setting& outs, channel_t* channel, int i, in
                     cerr << "Configuration error: devices.[" << i << "] channels.[" << j << "] outputs.[" << o << "]: ";
                 }
                 cerr << "missing dest_port\n";
+                error();
+            }
+        } else if (!strncmp(outs[o]["type"], "tcp_stream_server", 17)) {
+            channel->outputs[oo].data = XCALLOC(1, sizeof(struct tcp_stream_server_data));
+            channel->outputs[oo].type = O_TCP_STREAM_SERVER;
+
+            tcp_stream_server_data* sdata = (tcp_stream_server_data*)channel->outputs[oo].data;
+            sdata->continuous = outs[o].exists("continuous") ? (bool)(outs[o]["continuous"]) : false;
+            sdata->bind_address = outs[o].exists("bind_address") ? strdup(outs[o]["bind_address"]) : strdup("0.0.0.0");
+
+            if (outs[o].exists("bind_port")) {
+                if (outs[o]["bind_port"].getType() == libconfig::Setting::TypeInt) {
+                    char buffer[12];
+                    sprintf(buffer, "%d", (int)outs[o]["bind_port"]);
+                    sdata->bind_port = strdup(buffer);
+                } else {
+                    sdata->bind_port = strdup(outs[o]["bind_port"]);
+                }
+            } else if (outs[o].exists("dest_port")) {
+                if (outs[o]["dest_port"].getType() == libconfig::Setting::TypeInt) {
+                    char buffer[12];
+                    sprintf(buffer, "%d", (int)outs[o]["dest_port"]);
+                    sdata->bind_port = strdup(buffer);
+                } else {
+                    sdata->bind_port = strdup(outs[o]["dest_port"]);
+                }
+            } else {
+                if (parsing_mixers) {
+                    cerr << "Configuration error: mixers.[" << i << "] outputs.[" << o << "]: ";
+                } else {
+                    cerr << "Configuration error: devices.[" << i << "] channels.[" << j << "] outputs.[" << o << "]: ";
+                }
+                cerr << "missing bind_port\n";
                 error();
             }
 #ifdef WITH_PULSEAUDIO

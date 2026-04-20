@@ -12,6 +12,7 @@ class QLabel;
 class QPushButton;
 class QSpinBox;
 class QSlider;
+class QLineEdit;
 QT_END_NAMESPACE
 
 class MainWindow : public QMainWindow {
@@ -38,6 +39,7 @@ class MainWindow : public QMainWindow {
     QLabel* labelValue_;
     QLabel* squelchValue_;
     QLabel* seqValue_;
+    QLineEdit* backendHost_;
     QSpinBox* audioPort_;
     QSpinBox* metadataPort_;
     QSlider* volume_;

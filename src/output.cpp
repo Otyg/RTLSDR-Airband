@@ -587,6 +587,31 @@ void process_outputs(channel_t* channel, int cur_scan_freq) {
             } else {
                 udp_stream_write(sdata, channel->waveout, channel->waveout_r, (size_t)WAVE_BATCH * sizeof(float));
             }
+        } else if (channel->outputs[k].type == O_SCAN_META_TCP_SERVER) {
+            scan_meta_tcp_server_data* sdata = (scan_meta_tcp_server_data*)channel->outputs[k].data;
+            int meta_freq_idx = -1;
+            if (cur_scan_freq >= 0 && cur_scan_freq < channel->freq_count) {
+                meta_freq_idx = cur_scan_freq;
+            } else if (sdata->continuous) {
+                meta_freq_idx = channel->freq_idx;
+            }
+
+            if (meta_freq_idx >= 0 && meta_freq_idx < channel->freq_count) {
+                struct freq_t const* fparms = channel->freqlist + meta_freq_idx;
+                scan_meta_tcp_server_write(sdata, -1, fparms->frequency, fparms->label, channel->axcindicate != NO_SIGNAL);
+            }
+        } else if (channel->outputs[k].type == O_TCP_STREAM_SERVER) {
+            tcp_stream_server_data* sdata = (tcp_stream_server_data*)channel->outputs[k].data;
+
+            if (sdata->continuous == false && channel->axcindicate == NO_SIGNAL) {
+                continue;
+            }
+
+            if (channel->mode == MM_MONO) {
+                tcp_stream_server_write(sdata, channel->waveout, (size_t)WAVE_BATCH * sizeof(float));
+            } else {
+                tcp_stream_server_write(sdata, channel->waveout, channel->waveout_r, (size_t)WAVE_BATCH * sizeof(float));
+            }
 
 #ifdef WITH_PULSEAUDIO
         } else if (channel->outputs[k].type == O_PULSE) {
@@ -623,6 +648,12 @@ void disable_channel_outputs(channel_t* channel) {
         } else if (output->type == O_UDP_STREAM) {
             udp_stream_data* sdata = (udp_stream_data*)output->data;
             udp_stream_shutdown(sdata);
+        } else if (output->type == O_SCAN_META_TCP_SERVER) {
+            scan_meta_tcp_server_data* sdata = (scan_meta_tcp_server_data*)output->data;
+            scan_meta_tcp_server_shutdown(sdata);
+        } else if (output->type == O_TCP_STREAM_SERVER) {
+            tcp_stream_server_data* sdata = (tcp_stream_server_data*)output->data;
+            tcp_stream_server_shutdown(sdata);
 #ifdef WITH_PULSEAUDIO
         } else if (output->type == O_PULSE) {
             pulse_data* pdata = (pulse_data*)(output->data);
@@ -1004,6 +1035,8 @@ void* output_check_thread(void*) {
 
                         if (dev->input->state == INPUT_FAILED) {
                             udp_stream_shutdown(sdata);
+                        } else if (dev->input->state == INPUT_RUNNING && sdata->send_socket == -1) {
+                            udp_stream_init(sdata, dev->channels[j].mode, (size_t)WAVE_BATCH * sizeof(float));
                         }
                     } else if (dev->channels[j].outputs[k].type == O_SCAN_META_UDP) {
                         scan_meta_udp_data* sdata = (scan_meta_udp_data*)dev->channels[j].outputs[k].data;
@@ -1012,6 +1045,22 @@ void* output_check_thread(void*) {
                             scan_meta_udp_shutdown(sdata);
                         } else if (dev->input->state == INPUT_RUNNING && sdata->send_socket == -1) {
                             scan_meta_udp_init(sdata);
+                        }
+                    } else if (dev->channels[j].outputs[k].type == O_TCP_STREAM_SERVER) {
+                        tcp_stream_server_data* sdata = (tcp_stream_server_data*)dev->channels[j].outputs[k].data;
+
+                        if (dev->input->state == INPUT_FAILED) {
+                            tcp_stream_server_shutdown(sdata);
+                        } else if (dev->input->state == INPUT_RUNNING && sdata->listen_socket == -1) {
+                            tcp_stream_server_init(sdata, dev->channels[j].mode, (size_t)WAVE_BATCH * sizeof(float));
+                        }
+                    } else if (dev->channels[j].outputs[k].type == O_SCAN_META_TCP_SERVER) {
+                        scan_meta_tcp_server_data* sdata = (scan_meta_tcp_server_data*)dev->channels[j].outputs[k].data;
+
+                        if (dev->input->state == INPUT_FAILED) {
+                            scan_meta_tcp_server_shutdown(sdata);
+                        } else if (dev->input->state == INPUT_RUNNING && sdata->listen_socket == -1) {
+                            scan_meta_tcp_server_init(sdata);
                         }
 #ifdef WITH_PULSEAUDIO
                     } else if (dev->channels[j].outputs[k].type == O_PULSE) {
@@ -1041,6 +1090,11 @@ void* output_check_thread(void*) {
                     if (icecast->shout == NULL) {
                         log(LOG_NOTICE, "Trying to reconnect to %s:%d/%s...\n", icecast->hostname, icecast->port, icecast->mountpoint);
                         shout_setup(icecast, mixers[i].channel.mode);
+                    }
+                } else if (mixers[i].channel.outputs[k].type == O_TCP_STREAM_SERVER) {
+                    tcp_stream_server_data* sdata = (tcp_stream_server_data*)(mixers[i].channel.outputs[k].data);
+                    if (sdata->listen_socket == -1) {
+                        tcp_stream_server_init(sdata, mixers[i].channel.mode, (size_t)WAVE_BATCH * sizeof(float));
                     }
 #ifdef WITH_PULSEAUDIO
                 } else if (mixers[i].channel.outputs[k].type == O_PULSE) {

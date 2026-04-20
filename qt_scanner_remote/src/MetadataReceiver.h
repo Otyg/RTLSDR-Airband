@@ -1,16 +1,17 @@
 #ifndef METADATA_RECEIVER_H
 #define METADATA_RECEIVER_H
 
+#include <QByteArray>
 #include <QObject>
 #include <QString>
-#include <QUdpSocket>
+#include <QTcpSocket>
 
 class MetadataReceiver : public QObject {
     Q_OBJECT
 
    public:
     explicit MetadataReceiver(QObject* parent = nullptr);
-    bool bind(quint16 port);
+    bool connectToHost(QString const& host, quint16 port, int timeoutMs = 3000);
     void close();
 
    signals:
@@ -19,9 +20,11 @@ class MetadataReceiver : public QObject {
 
    private slots:
     void onReadyRead();
+    void onSocketError(QAbstractSocket::SocketError socketError);
 
    private:
-    QUdpSocket socket_;
+    QTcpSocket socket_;
+    QByteArray pending_;
 };
 
 #endif

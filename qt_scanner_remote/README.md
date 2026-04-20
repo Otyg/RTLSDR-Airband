@@ -3,8 +3,9 @@
 Minimal Qt6 GUI client for RTLSDR-Airband scanner remote mode.
 
 ## Features (v1)
-- Receives audio as UDP float32 mono (`udp_stream` output)
-- Receives scanner metadata as UDP JSON (`scan_meta_udp` output)
+- Connects to backend over TCP
+- Receives audio as float32 mono (`tcp_stream_server` output)
+- Receives scanner metadata as JSON (`scan_meta_tcp_server` output)
 - Plays audio locally
 - Displays active frequency, label, squelch state and sequence counter
 
@@ -21,7 +22,8 @@ cmake --build build -j
 ./qt_scanner_remote
 ```
 
-Default ports:
+Default connection:
+- Backend host: `127.0.0.1`
 - Audio: `9000`
 - Metadata: `9001`
 

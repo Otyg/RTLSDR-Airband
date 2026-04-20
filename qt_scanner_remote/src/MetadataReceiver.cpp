@@ -1,38 +1,45 @@
 #include "MetadataReceiver.h"
 
-#include <QHostAddress>
 #include <QJsonDocument>
 #include <QJsonObject>
 
 MetadataReceiver::MetadataReceiver(QObject* parent) : QObject(parent) {
-    connect(&socket_, &QUdpSocket::readyRead, this, &MetadataReceiver::onReadyRead);
+    connect(&socket_, &QTcpSocket::readyRead, this, &MetadataReceiver::onReadyRead);
+    connect(&socket_, &QAbstractSocket::errorOccurred, this, &MetadataReceiver::onSocketError);
 }
 
-bool MetadataReceiver::bind(quint16 port) {
+bool MetadataReceiver::connectToHost(QString const& host, quint16 port, int timeoutMs) {
     close();
-    bool ok = socket_.bind(QHostAddress::AnyIPv4, port, QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint);
-    if (!ok) {
-        emit errorMessage(QString("Metadata bind failed on port %1: %2").arg(port).arg(socket_.errorString()));
+    socket_.connectToHost(host, port);
+    if (!socket_.waitForConnected(timeoutMs)) {
+        emit errorMessage(QString("Metadata connect failed to %1:%2: %3").arg(host).arg(port).arg(socket_.errorString()));
+        return false;
     }
-    return ok;
+    return true;
 }
 
 void MetadataReceiver::close() {
     if (socket_.state() != QAbstractSocket::UnconnectedState) {
-        socket_.close();
+        socket_.disconnectFromHost();
+        if (socket_.state() != QAbstractSocket::UnconnectedState) {
+            socket_.waitForDisconnected(200);
+        }
     }
+    pending_.clear();
 }
 
 void MetadataReceiver::onReadyRead() {
-    while (socket_.hasPendingDatagrams()) {
-        QByteArray datagram;
-        datagram.resize(static_cast<int>(socket_.pendingDatagramSize()));
-        if (socket_.readDatagram(datagram.data(), datagram.size()) <= 0) {
+    pending_.append(socket_.readAll());
+    int newlinePos = -1;
+    while ((newlinePos = pending_.indexOf('\n')) != -1) {
+        QByteArray line = pending_.left(newlinePos).trimmed();
+        pending_.remove(0, newlinePos + 1);
+        if (line.isEmpty()) {
             continue;
         }
 
         QJsonParseError parseError;
-        QJsonDocument json = QJsonDocument::fromJson(datagram.trimmed(), &parseError);
+        QJsonDocument json = QJsonDocument::fromJson(line, &parseError);
         if (parseError.error != QJsonParseError::NoError || !json.isObject()) {
             emit errorMessage(QString("Metadata parse error: %1").arg(parseError.errorString()));
             continue;
@@ -46,4 +53,9 @@ void MetadataReceiver::onReadyRead() {
         quint32 seq = static_cast<quint32>(obj.value("seq").toInt(0));
         emit metadataReceived(device, freqHz, squelchOpen, label, seq);
     }
+}
+
+void MetadataReceiver::onSocketError(QAbstractSocket::SocketError socketError) {
+    Q_UNUSED(socketError);
+    emit errorMessage(QString("Metadata socket error: %1").arg(socket_.errorString()));
 }

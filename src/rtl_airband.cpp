@@ -282,6 +282,16 @@ bool init_output(channel_t* channel, output_t* output) {
         if (!udp_stream_init(sdata, channel->mode, (size_t)WAVE_BATCH * sizeof(float))) {
             return false;
         }
+    } else if (output->type == O_SCAN_META_TCP_SERVER) {
+        scan_meta_tcp_server_data* sdata = (scan_meta_tcp_server_data*)(output->data);
+        if (!scan_meta_tcp_server_init(sdata)) {
+            return false;
+        }
+    } else if (output->type == O_TCP_STREAM_SERVER) {
+        tcp_stream_server_data* sdata = (tcp_stream_server_data*)(output->data);
+        if (!tcp_stream_server_init(sdata, channel->mode, (size_t)WAVE_BATCH * sizeof(float))) {
+            return false;
+        }
 #ifdef WITH_PULSEAUDIO
     } else if (output->type == O_PULSE) {
         pulse_init();

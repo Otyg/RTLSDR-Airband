@@ -107,7 +107,9 @@ enum output_type {
     O_RAWFILE,
     O_MIXER,
     O_SCAN_META_UDP,
-    O_UDP_STREAM
+    O_UDP_STREAM,
+    O_SCAN_META_TCP_SERVER,
+    O_TCP_STREAM_SERVER
 #ifdef WITH_PULSEAUDIO
     ,
     O_PULSE
@@ -168,6 +170,28 @@ struct scan_meta_udp_data {
     int send_socket;
     struct sockaddr dest_sockaddr;
     socklen_t dest_sockaddr_len;
+};
+
+struct tcp_stream_server_data {
+    float* stereo_buffer;
+    size_t stereo_buffer_len;
+
+    bool continuous;
+    const char* bind_address;
+    const char* bind_port;
+
+    int listen_socket;
+    int client_socket;
+};
+
+struct scan_meta_tcp_server_data {
+    bool continuous;
+    const char* bind_address;
+    const char* bind_port;
+    uint32_t seq;
+
+    int listen_socket;
+    int client_socket;
 };
 
 #ifdef WITH_PULSEAUDIO
@@ -409,6 +433,17 @@ void udp_stream_shutdown(udp_stream_data* sdata);
 bool scan_meta_udp_init(scan_meta_udp_data* sdata);
 void scan_meta_udp_write(scan_meta_udp_data* sdata, int device_idx, int freq_hz, char const* label, bool squelch_open);
 void scan_meta_udp_shutdown(scan_meta_udp_data* sdata);
+
+// tcp_stream_server.cpp
+bool tcp_stream_server_init(tcp_stream_server_data* sdata, mix_modes mode, size_t len);
+void tcp_stream_server_write(tcp_stream_server_data* sdata, const float* data, size_t len);
+void tcp_stream_server_write(tcp_stream_server_data* sdata, const float* data_left, const float* data_right, size_t len);
+void tcp_stream_server_shutdown(tcp_stream_server_data* sdata);
+
+// scan_meta_tcp_server.cpp
+bool scan_meta_tcp_server_init(scan_meta_tcp_server_data* sdata);
+void scan_meta_tcp_server_write(scan_meta_tcp_server_data* sdata, int device_idx, int freq_hz, char const* label, bool squelch_open);
+void scan_meta_tcp_server_shutdown(scan_meta_tcp_server_data* sdata);
 
 #ifdef WITH_PULSEAUDIO
 #define PULSE_STREAM_LATENCY_LIMIT 10000000UL
