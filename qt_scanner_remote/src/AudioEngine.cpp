@@ -9,46 +9,13 @@
 #include <QAudioSink>
 #include <QIODevice>
 #include <QMediaDevices>
-#include <QMutex>
-#include <QMutexLocker>
+#include <QTimer>
 
-class AudioEngine::AudioBufferDevice : public QIODevice {
-   public:
-    explicit AudioBufferDevice(QObject* parent = nullptr) : QIODevice(parent) {}
-
-    void append(QByteArray const& chunk) {
-        QMutexLocker lock(&mutex_);
-        buffer_.append(chunk);
-
-        static const int maxBufferedBytes = 16000 * 2 * 2;
-        if (buffer_.size() > maxBufferedBytes) {
-            buffer_.remove(0, buffer_.size() - maxBufferedBytes);
-        }
-    }
-
-   protected:
-    qint64 readData(char* data, qint64 maxSize) override {
-        QMutexLocker lock(&mutex_);
-        qint64 toCopy = std::min<qint64>(maxSize, buffer_.size());
-        if (toCopy > 0) {
-            memcpy(data, buffer_.constData(), static_cast<size_t>(toCopy));
-            buffer_.remove(0, static_cast<int>(toCopy));
-            return toCopy;
-        }
-        memset(data, 0, static_cast<size_t>(maxSize));
-        return maxSize;
-    }
-
-    qint64 writeData(char const*, qint64) override {
-        return -1;
-    }
-
-   private:
-    QMutex mutex_;
-    QByteArray buffer_;
-};
-
-AudioEngine::AudioEngine(QObject* parent) : QObject(parent), sink_(nullptr), device_(nullptr) {}
+AudioEngine::AudioEngine(QObject* parent)
+    : QObject(parent), sink_(nullptr), outputDevice_(nullptr), flushTimer_(new QTimer(this)), lastWriteFailed_(false) {
+    flushTimer_->setInterval(15);
+    connect(flushTimer_, &QTimer::timeout, this, [this]() { flushPendingPcm(); });
+}
 
 AudioEngine::~AudioEngine() {
     stop();
@@ -73,12 +40,24 @@ bool AudioEngine::start() {
         return false;
     }
 
-    device_ = new AudioBufferDevice(this);
-    device_->open(QIODevice::ReadOnly);
-
     sink_ = new QAudioSink(output, format, this);
+    // Ask Qt backend for a small output buffer (~100 ms).
+    sink_->setBufferSize(16000 * 2 / 10);
     sink_->setVolume(1.0f);
-    sink_->start(device_);
+    connect(sink_, &QAudioSink::stateChanged, this, [this](QAudio::State) {
+        emit statusMessage(QString("Audio: %1").arg(stateToText()));
+    });
+    outputDevice_ = sink_->start();
+    if (!outputDevice_) {
+        emit errorMessage("Failed to start audio output stream");
+        sink_->deleteLater();
+        sink_ = nullptr;
+        return false;
+    }
+    pendingPcm_.clear();
+    lastWriteFailed_ = false;
+    flushTimer_->start();
+    emit statusMessage(QString("Audio: %1").arg(stateToText()));
     return true;
 }
 
@@ -88,11 +67,13 @@ void AudioEngine::stop() {
         sink_->deleteLater();
         sink_ = nullptr;
     }
-    if (device_) {
-        device_->close();
-        device_->deleteLater();
-        device_ = nullptr;
+    if (flushTimer_->isActive()) {
+        flushTimer_->stop();
     }
+    outputDevice_ = nullptr;
+    pendingPcm_.clear();
+    lastWriteFailed_ = false;
+    emit statusMessage("Audio: stopped");
 }
 
 void AudioEngine::setVolume(float volume) {
@@ -102,7 +83,7 @@ void AudioEngine::setVolume(float volume) {
 }
 
 void AudioEngine::pushFloat32Mono(QByteArray data) {
-    if (!device_ || data.isEmpty()) {
+    if (!sink_ || !outputDevice_ || data.isEmpty()) {
         return;
     }
     if (data.size() % static_cast<int>(sizeof(float)) != 0) {
@@ -120,5 +101,76 @@ void AudioEngine::pushFloat32Mono(QByteArray data) {
         out[i] = static_cast<int16_t>(v * 32767.0f);
     }
 
-    device_->append(pcm);
+    emit pcmChunk(pcm);
+    pendingPcm_.append(pcm);
+    // Cap queued audio to keep latency bounded (~300 ms).
+    static const int maxPendingBytes = 16000 * 2 * 3 / 10;
+    if (pendingPcm_.size() > maxPendingBytes) {
+        pendingPcm_.remove(0, pendingPcm_.size() - maxPendingBytes);
+    }
+    flushPendingPcm();
+}
+
+void AudioEngine::flushPendingPcm() {
+    if (!sink_ || !outputDevice_ || pendingPcm_.isEmpty()) {
+        return;
+    }
+
+    if (sink_->state() == QAudio::SuspendedState) {
+        sink_->resume();
+    }
+
+    qint64 written = outputDevice_->write(pendingPcm_.constData(), pendingPcm_.size());
+    if (written > 0) {
+        pendingPcm_.remove(0, static_cast<int>(written));
+        lastWriteFailed_ = false;
+    } else if (written < 0) {
+        if (!lastWriteFailed_) {
+            emit errorMessage(QString("Audio write failed: %1").arg(stateToText()));
+            lastWriteFailed_ = true;
+        }
+    }
+}
+
+QString AudioEngine::stateToText() const {
+    if (!sink_) {
+        return "no sink";
+    }
+
+    QString state;
+    switch (sink_->state()) {
+        case QAudio::ActiveState:
+            state = "active";
+            break;
+        case QAudio::IdleState:
+            state = "idle";
+            break;
+        case QAudio::SuspendedState:
+            state = "suspended";
+            break;
+        case QAudio::StoppedState:
+            state = "stopped";
+            break;
+    }
+
+    QString error;
+    switch (sink_->error()) {
+        case QAudio::NoError:
+            error = "no-error";
+            break;
+        case QAudio::OpenError:
+            error = "open-error";
+            break;
+        case QAudio::IOError:
+            error = "io-error";
+            break;
+        case QAudio::UnderrunError:
+            error = "underrun";
+            break;
+        case QAudio::FatalError:
+            error = "fatal-error";
+            break;
+    }
+
+    return QString("%1 (%2)").arg(state, error);
 }

@@ -8,6 +8,7 @@
 QT_BEGIN_NAMESPACE
 class QAudioSink;
 class QIODevice;
+class QTimer;
 QT_END_NAMESPACE
 
 class AudioEngine : public QObject {
@@ -26,11 +27,17 @@ class AudioEngine : public QObject {
 
    signals:
     void errorMessage(QString message);
+    void pcmChunk(QByteArray data);
+    void statusMessage(QString message);
 
    private:
-    class AudioBufferDevice;
     QAudioSink* sink_;
-    AudioBufferDevice* device_;
+    QIODevice* outputDevice_;
+    QByteArray pendingPcm_;
+    QTimer* flushTimer_;
+    bool lastWriteFailed_;
+    void flushPendingPcm();
+    QString stateToText() const;
 };
 
 #endif

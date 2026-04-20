@@ -31,6 +31,56 @@
 
 using namespace std;
 
+static void append_json_escaped_string(string* dst, char const* src) {
+    if (src == NULL) {
+        return;
+    }
+    for (char const* p = src; *p != '\0'; ++p) {
+        switch (*p) {
+            case '\"':
+                *dst += "\\\"";
+                break;
+            case '\\':
+                *dst += "\\\\";
+                break;
+            case '\b':
+                *dst += "\\b";
+                break;
+            case '\f':
+                *dst += "\\f";
+                break;
+            case '\n':
+                *dst += "\\n";
+                break;
+            case '\r':
+                *dst += "\\r";
+                break;
+            case '\t':
+                *dst += "\\t";
+                break;
+            default:
+                *dst += *p;
+                break;
+        }
+    }
+}
+
+static char* build_channel_list_json(channel_t const* channel) {
+    string msg = "{\"v\":1,\"type\":\"channels\",\"channels\":[";
+    for (int f = 0; f < channel->freq_count; ++f) {
+        if (f > 0) {
+            msg += ",";
+        }
+        msg += "{\"freq_hz\":";
+        msg += to_string(channel->freqlist[f].frequency);
+        msg += ",\"label\":\"";
+        append_json_escaped_string(&msg, channel->freqlist[f].label);
+        msg += "\"}";
+    }
+    msg += "]}\n";
+    return strdup(msg.c_str());
+}
+
 static int parse_outputs(libconfig::Setting& outs, channel_t* channel, int i, int j, bool parsing_mixers) {
     int oo = 0;
     for (int o = 0; o < channel->output_count; o++) {
@@ -233,6 +283,7 @@ static int parse_outputs(libconfig::Setting& outs, channel_t* channel, int i, in
             scan_meta_tcp_server_data* sdata = (scan_meta_tcp_server_data*)channel->outputs[oo].data;
             sdata->continuous = outs[o].exists("continuous") ? (bool)(outs[o]["continuous"]) : false;
             sdata->bind_address = outs[o].exists("bind_address") ? strdup(outs[o]["bind_address"]) : strdup("0.0.0.0");
+            sdata->channel_list_json = build_channel_list_json(channel);
 
             if (outs[o].exists("bind_port")) {
                 if (outs[o]["bind_port"].getType() == libconfig::Setting::TypeInt) {

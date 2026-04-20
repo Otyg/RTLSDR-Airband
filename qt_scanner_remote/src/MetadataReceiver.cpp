@@ -46,6 +46,11 @@ void MetadataReceiver::onReadyRead() {
         }
 
         QJsonObject obj = json.object();
+        QString msgType = obj.value("type").toString();
+        if (msgType == "channels") {
+            // Initial channel catalog from backend.
+            continue;
+        }
         int device = obj.value("device").toInt(-1);
         qint64 freqHz = static_cast<qint64>(obj.value("freq_hz").toDouble(0));
         bool squelchOpen = obj.value("squelch_open").toBool(false);

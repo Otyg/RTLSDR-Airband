@@ -188,7 +188,10 @@ struct scan_meta_tcp_server_data {
     bool continuous;
     const char* bind_address;
     const char* bind_port;
+    const char* channel_list_json;
     uint32_t seq;
+    bool hello_sent;
+    size_t hello_offset;
 
     int listen_socket;
     int client_socket;

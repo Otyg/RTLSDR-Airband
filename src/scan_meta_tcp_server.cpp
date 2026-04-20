@@ -75,6 +75,8 @@ static void close_client(scan_meta_tcp_server_data* sdata) {
     if (sdata->client_socket != -1) {
         close(sdata->client_socket);
         sdata->client_socket = -1;
+        sdata->hello_sent = false;
+        sdata->hello_offset = 0;
     }
 }
 
@@ -110,7 +112,32 @@ static void accept_client_if_available(scan_meta_tcp_server_data* sdata) {
             close(sdata->client_socket);
         }
         sdata->client_socket = client;
+        sdata->hello_sent = false;
+        sdata->hello_offset = 0;
         log(LOG_INFO, "scan_meta_tcp_server: client connected on %s:%s\n", sdata->bind_address, sdata->bind_port);
+    }
+}
+
+static void send_hello_if_needed(scan_meta_tcp_server_data* sdata) {
+    if (sdata->client_socket == -1 || sdata->hello_sent || sdata->channel_list_json == NULL) {
+        return;
+    }
+
+    size_t msglen = strlen(sdata->channel_list_json);
+    if (sdata->hello_offset >= msglen) {
+        sdata->hello_sent = true;
+        return;
+    }
+
+    ssize_t sent = send(sdata->client_socket, sdata->channel_list_json + sdata->hello_offset, msglen - sdata->hello_offset, MSG_DONTWAIT | MSG_NOSIGNAL);
+    if (sent > 0) {
+        sdata->hello_offset += (size_t)sent;
+        if (sdata->hello_offset >= msglen) {
+            sdata->hello_sent = true;
+        }
+    } else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        log(LOG_INFO, "scan_meta_tcp_server: client disconnected during hello on %s:%s (%s)\n", sdata->bind_address, sdata->bind_port, strerror(errno));
+        close_client(sdata);
     }
 }
 
@@ -118,6 +145,8 @@ bool scan_meta_tcp_server_init(scan_meta_tcp_server_data* sdata) {
     sdata->seq = 0;
     sdata->listen_socket = -1;
     sdata->client_socket = -1;
+    sdata->hello_sent = false;
+    sdata->hello_offset = 0;
 
     struct addrinfo hints;
     struct addrinfo* result;
@@ -174,8 +203,9 @@ bool scan_meta_tcp_server_init(scan_meta_tcp_server_data* sdata) {
 
 void scan_meta_tcp_server_write(scan_meta_tcp_server_data* sdata, int device_idx, int freq_hz, char const* label, bool squelch_open) {
     accept_client_if_available(sdata);
+    send_hello_if_needed(sdata);
 
-    if (sdata->client_socket == -1) {
+    if (sdata->client_socket == -1 || !sdata->hello_sent) {
         return;
     }
 
