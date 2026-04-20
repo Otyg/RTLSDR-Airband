@@ -1,5 +1,6 @@
 #include "MetadataReceiver.h"
 
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 
@@ -48,7 +49,18 @@ void MetadataReceiver::onReadyRead() {
         QJsonObject obj = json.object();
         QString msgType = obj.value("type").toString();
         if (msgType == "channels") {
-            // Initial channel catalog from backend.
+            QList<qint64> freqsHz;
+            QStringList labels;
+            QJsonArray channels = obj.value("channels").toArray();
+            for (QJsonValue const& chan : channels) {
+                if (!chan.isObject()) {
+                    continue;
+                }
+                QJsonObject c = chan.toObject();
+                freqsHz.append(static_cast<qint64>(c.value("freq_hz").toDouble(0)));
+                labels.append(c.value("label").toString());
+            }
+            emit channelsReceived(freqsHz, labels);
             continue;
         }
         int device = obj.value("device").toInt(-1);

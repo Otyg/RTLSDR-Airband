@@ -12,7 +12,7 @@
 #include <QTimer>
 
 AudioEngine::AudioEngine(QObject* parent)
-    : QObject(parent), sink_(nullptr), outputDevice_(nullptr), flushTimer_(new QTimer(this)), lastWriteFailed_(false) {
+    : QObject(parent), sink_(nullptr), outputDevice_(nullptr), flushTimer_(new QTimer(this)), volume_(1.0f), running_(false), lastWriteFailed_(false), restartPending_(false) {
     flushTimer_->setInterval(15);
     connect(flushTimer_, &QTimer::timeout, this, [this]() { flushPendingPcm(); });
 }
@@ -23,49 +23,24 @@ AudioEngine::~AudioEngine() {
 
 bool AudioEngine::start() {
     stop();
-
-    QAudioDevice output = QMediaDevices::defaultAudioOutput();
-    if (output.isNull()) {
-        emit errorMessage("No audio output device available");
-        return false;
-    }
-
-    QAudioFormat format;
-    format.setSampleRate(16000);
-    format.setChannelCount(1);
-    format.setSampleFormat(QAudioFormat::Int16);
-
-    if (!output.isFormatSupported(format)) {
-        emit errorMessage("Audio format 16kHz mono s16 is not supported");
-        return false;
-    }
-
-    sink_ = new QAudioSink(output, format, this);
-    // Ask Qt backend for a small output buffer (~100 ms).
-    sink_->setBufferSize(16000 * 2 / 10);
-    sink_->setVolume(1.0f);
-    connect(sink_, &QAudioSink::stateChanged, this, [this](QAudio::State) {
-        emit statusMessage(QString("Audio: %1").arg(stateToText()));
-    });
-    outputDevice_ = sink_->start();
-    if (!outputDevice_) {
-        emit errorMessage("Failed to start audio output stream");
-        sink_->deleteLater();
-        sink_ = nullptr;
-        return false;
-    }
+    running_ = true;
     pendingPcm_.clear();
     lastWriteFailed_ = false;
+    restartPending_ = false;
+    if (!createSink()) {
+        running_ = false;
+        return false;
+    }
     flushTimer_->start();
     emit statusMessage(QString("Audio: %1").arg(stateToText()));
     return true;
 }
 
 void AudioEngine::stop() {
+    running_ = false;
+    restartPending_ = false;
     if (sink_) {
-        sink_->stop();
-        sink_->deleteLater();
-        sink_ = nullptr;
+        teardownSink();
     }
     if (flushTimer_->isActive()) {
         flushTimer_->stop();
@@ -77,13 +52,14 @@ void AudioEngine::stop() {
 }
 
 void AudioEngine::setVolume(float volume) {
+    volume_ = std::clamp(volume, 0.0f, 1.0f);
     if (sink_) {
-        sink_->setVolume(std::clamp(volume, 0.0f, 1.0f));
+        sink_->setVolume(volume_);
     }
 }
 
 void AudioEngine::pushFloat32Mono(QByteArray data) {
-    if (!sink_ || !outputDevice_ || data.isEmpty()) {
+    if (!running_ || data.isEmpty()) {
         return;
     }
     if (data.size() % static_cast<int>(sizeof(float)) != 0) {
@@ -112,12 +88,19 @@ void AudioEngine::pushFloat32Mono(QByteArray data) {
 }
 
 void AudioEngine::flushPendingPcm() {
-    if (!sink_ || !outputDevice_ || pendingPcm_.isEmpty()) {
+    if (!running_ || pendingPcm_.isEmpty()) {
+        return;
+    }
+    if (!sink_ || !outputDevice_) {
+        scheduleSinkRestart("sink missing");
         return;
     }
 
     if (sink_->state() == QAudio::SuspendedState) {
         sink_->resume();
+    } else if (sink_->state() == QAudio::StoppedState && sink_->error() != QAudio::NoError) {
+        scheduleSinkRestart(stateToText());
+        return;
     }
 
     qint64 written = outputDevice_->write(pendingPcm_.constData(), pendingPcm_.size());
@@ -125,11 +108,83 @@ void AudioEngine::flushPendingPcm() {
         pendingPcm_.remove(0, static_cast<int>(written));
         lastWriteFailed_ = false;
     } else if (written < 0) {
-        if (!lastWriteFailed_) {
+        if (!lastWriteFailed_ && running_) {
             emit errorMessage(QString("Audio write failed: %1").arg(stateToText()));
             lastWriteFailed_ = true;
         }
+        scheduleSinkRestart("write error");
     }
+}
+
+bool AudioEngine::createSink() {
+    QAudioDevice output = QMediaDevices::defaultAudioOutput();
+    if (output.isNull()) {
+        emit errorMessage("No audio output device available");
+        return false;
+    }
+
+    QAudioFormat format;
+    format.setSampleRate(16000);
+    format.setChannelCount(1);
+    format.setSampleFormat(QAudioFormat::Int16);
+
+    if (!output.isFormatSupported(format)) {
+        emit errorMessage("Audio format 16kHz mono s16 is not supported");
+        return false;
+    }
+
+    sink_ = new QAudioSink(output, format, this);
+    sink_->setBufferSize(16000 * 2 / 10);
+    sink_->setVolume(volume_);
+    connect(sink_, &QAudioSink::stateChanged, this, [this](QAudio::State state) {
+        emit statusMessage(QString("Audio: %1").arg(stateToText()));
+        if (!running_) {
+            return;
+        }
+        if (state == QAudio::StoppedState && sink_ && sink_->error() != QAudio::NoError) {
+            scheduleSinkRestart(stateToText());
+        }
+    });
+
+    outputDevice_ = sink_->start();
+    if (!outputDevice_) {
+        emit errorMessage("Failed to start audio output stream");
+        sink_->deleteLater();
+        sink_ = nullptr;
+        return false;
+    }
+    return true;
+}
+
+void AudioEngine::teardownSink() {
+    if (!sink_) {
+        outputDevice_ = nullptr;
+        return;
+    }
+    sink_->stop();
+    sink_->deleteLater();
+    sink_ = nullptr;
+    outputDevice_ = nullptr;
+}
+
+void AudioEngine::scheduleSinkRestart(QString const& reason) {
+    if (!running_ || restartPending_) {
+        return;
+    }
+    restartPending_ = true;
+    emit statusMessage(QString("Audio: restarting (%1)").arg(reason));
+    QTimer::singleShot(50, this, [this]() {
+        restartPending_ = false;
+        if (!running_) {
+            return;
+        }
+        teardownSink();
+        if (!createSink()) {
+            emit errorMessage("Audio restart failed");
+            return;
+        }
+        flushPendingPcm();
+    });
 }
 
 QString AudioEngine::stateToText() const {

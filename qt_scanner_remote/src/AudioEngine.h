@@ -35,7 +35,13 @@ class AudioEngine : public QObject {
     QIODevice* outputDevice_;
     QByteArray pendingPcm_;
     QTimer* flushTimer_;
+    float volume_;
+    bool running_;
     bool lastWriteFailed_;
+    bool restartPending_;
+    bool createSink();
+    void teardownSink();
+    void scheduleSinkRestart(QString const& reason);
     void flushPendingPcm();
     QString stateToText() const;
 };

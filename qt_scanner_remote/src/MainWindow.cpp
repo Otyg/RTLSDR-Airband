@@ -1,6 +1,8 @@
 #include "MainWindow.h"
 
+#include <algorithm>
 #include <QFormLayout>
+#include <QFrame>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -44,27 +46,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     inputLevelBar_->setRange(0, 100);
     inputLevelBar_->setValue(0);
     inputWaveform_ = new WaveformWidget(audioGroup);
-    waterfall_ = new WaterfallWidget(audioGroup);
     audioLayout->addRow("Volume", volume_);
     audioLayout->addRow("Level", inputLevelBar_);
     audioLayout->addRow("Waveform", inputWaveform_);
-    audioLayout->addRow("Waterfall", waterfall_);
 
-    QGroupBox* metadataGroup = new QGroupBox("Scanner", central);
-    QGridLayout* metadataLayout = new QGridLayout(metadataGroup);
-    statusValue_ = new QLabel("Idle", metadataGroup);
-    freqValue_ = new QLabel("-", metadataGroup);
-    labelValue_ = new QLabel("-", metadataGroup);
-    squelchValue_ = new QLabel("-", metadataGroup);
-
-    metadataLayout->addWidget(new QLabel("Status", metadataGroup), 0, 0);
-    metadataLayout->addWidget(statusValue_, 0, 1);
-    metadataLayout->addWidget(new QLabel("Frequency", metadataGroup), 1, 0);
-    metadataLayout->addWidget(freqValue_, 1, 1);
-    metadataLayout->addWidget(new QLabel("Label", metadataGroup), 2, 0);
-    metadataLayout->addWidget(labelValue_, 2, 1);
-    metadataLayout->addWidget(new QLabel("Squelch", metadataGroup), 3, 0);
-    metadataLayout->addWidget(squelchValue_, 3, 1);
+    statusValue_ = new QLabel("Idle", central);
+    scannerGroup_ = new QGroupBox("Scanner Channels", central);
+    scannerGrid_ = new QGridLayout(scannerGroup_);
+    scannerGrid_->addWidget(new QLabel("Waiting for channel list from backend..."), 0, 0);
 
     QGroupBox* logGroup = new QGroupBox("Squelch Log", central);
     QVBoxLayout* logLayout = new QVBoxLayout(logGroup);
@@ -83,7 +72,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     root->addWidget(networkGroup);
     root->addWidget(audioGroup);
-    root->addWidget(metadataGroup);
+    root->addWidget(statusValue_);
+    root->addWidget(scannerGroup_);
     root->addWidget(logGroup);
     root->addLayout(controls);
 
@@ -99,6 +89,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     connect(&audioReceiver_, &AudioReceiver::audioChunk, &audioEngine_, &AudioEngine::pushFloat32Mono);
     connect(&audioEngine_, &AudioEngine::pcmChunk, this, &MainWindow::onAudioChunk);
+    connect(&metadataReceiver_, &MetadataReceiver::channelsReceived, this, &MainWindow::onChannelsReceived);
     connect(&metadataReceiver_, &MetadataReceiver::metadataReceived, this, &MainWindow::onMetadata);
 
     connect(&audioReceiver_, &AudioReceiver::errorMessage, this, &MainWindow::onError);
@@ -149,14 +140,24 @@ void MainWindow::stopListening() {
     statusBar()->showMessage("Stopped");
 }
 
+void MainWindow::onChannelsReceived(QList<qint64> freqsHz, QStringList labels) {
+    channelFreqs_ = freqsHz;
+    channelLabels_ = labels;
+    rebuildChannelGrid(freqsHz, labels);
+}
+
 void MainWindow::onMetadata(int device, qint64 freqHz, bool squelchOpen, QString label, quint32 seq) {
     Q_UNUSED(device);
-
-    double mhz = static_cast<double>(freqHz) / 1000000.0;
-    freqValue_->setText(QString::number(mhz, 'f', 3) + " MHz");
-    labelValue_->setText(label.isEmpty() ? "-" : label);
-    squelchValue_->setText(squelchOpen ? "Open" : "Closed");
     Q_UNUSED(seq);
+
+    // Default: just above background, green-tinted.
+    for (qint64 f : textByFreq_.keys()) {
+        setChannelTextColor(f, "#1e3227");
+    }
+    if (textByFreq_.contains(freqHz)) {
+        // Scan: middle shade between default and traffic.
+        setChannelTextColor(freqHz, squelchOpen ? "#39ff14" : "#2aa54a");
+    }
 
     QDateTime now = QDateTime::currentDateTime();
     bool sameSignal = squelchOpen_ && squelchFreqHz_ == freqHz && squelchLabel_ == label;
@@ -208,7 +209,6 @@ void MainWindow::onAudioChunk(QByteArray pcmData) {
     inputLevelBar_->setValue(bar);
 
     inputWaveform_->setSamples(downsampleForWaveform(floatData));
-    waterfall_->appendFrame(downsampleForWaterfall(floatData));
 }
 
 QVector<float> MainWindow::downsampleForWaveform(QByteArray const& data) const {
@@ -250,39 +250,77 @@ QVector<float> MainWindow::downsampleForWaveform(QByteArray const& data) const {
     return out;
 }
 
-QVector<float> MainWindow::downsampleForWaterfall(QByteArray const& data) const {
-    int const sampleCount = data.size() / static_cast<int>(sizeof(float));
-    float const* in = reinterpret_cast<float const*>(data.constData());
+void MainWindow::clearChannelGrid() {
+    if (!scannerGrid_) {
+        return;
+    }
+    QLayoutItem* item = nullptr;
+    while ((item = scannerGrid_->takeAt(0)) != nullptr) {
+        if (item->widget()) {
+            item->widget()->deleteLater();
+        }
+        delete item;
+    }
+    textByFreq_.clear();
+}
 
-    int const bins = 192;
-    QVector<float> out;
-    out.reserve(bins);
+void MainWindow::setChannelTextColor(qint64 freqHz, QString const& color) {
+    if (!textByFreq_.contains(freqHz)) {
+        return;
+    }
+    for (QLabel* label : textByFreq_[freqHz]) {
+        if (label) {
+            label->setStyleSheet(QString("color:%1;").arg(color));
+        }
+    }
+}
 
-    if (sampleCount <= 0) {
-        return out;
+void MainWindow::rebuildChannelGrid(QList<qint64> const& freqsHz, QStringList const& labels) {
+    clearChannelGrid();
+
+    int count = std::min(freqsHz.size(), labels.size());
+    if (count <= 0) {
+        scannerGrid_->addWidget(new QLabel("No channels received from backend."), 0, 0);
+        return;
     }
 
-    for (int x = 0; x < bins; ++x) {
-        int start = (x * sampleCount) / bins;
-        int end = ((x + 1) * sampleCount) / bins;
-        if (end <= start) {
-            end = start + 1;
-        }
-        if (end > sampleCount) {
-            end = sampleCount;
-        }
-
-        float peak = 0.0f;
-        for (int i = start; i < end; ++i) {
-            float a = std::fabs(in[i]);
-            if (a > peak) {
-                peak = a;
-            }
-        }
-        out.push_back(peak);
+    int availableWidth = scannerGroup_->width();
+    if (availableWidth <= 0) {
+        availableWidth = width();
     }
+    int const minBoxWidth = 190;
+    int cols = std::max(1, availableWidth / minBoxWidth);
 
-    return out;
+    for (int i = 0; i < count; ++i) {
+        qint64 freqHz = freqsHz[i];
+        QString label = labels[i].isEmpty() ? "-" : labels[i];
+        QString freqText = QString::number(static_cast<double>(freqHz) / 1000000.0, 'f', 3) + " MHz";
+
+        QFrame* box = new QFrame(scannerGroup_);
+        box->setFrameShape(QFrame::StyledPanel);
+        box->setStyleSheet("QFrame { background:#111827; border:1px solid #2a3345; border-radius:8px; }");
+        QVBoxLayout* boxLayout = new QVBoxLayout(box);
+
+        QLabel* labelText = new QLabel(label, box);
+        labelText->setStyleSheet("font-weight:600; color:#1e3227;");
+        QLabel* freqLabel = new QLabel(freqText, box);
+        freqLabel->setStyleSheet("color:#1e3227;");
+
+        boxLayout->addWidget(labelText);
+        boxLayout->addWidget(freqLabel);
+
+        int row = i / cols;
+        int col = i % cols;
+        scannerGrid_->addWidget(box, row, col);
+        textByFreq_.insert(freqHz, QList<QLabel*>{labelText, freqLabel});
+    }
+}
+
+void MainWindow::resizeEvent(QResizeEvent* event) {
+    QMainWindow::resizeEvent(event);
+    if (!channelFreqs_.isEmpty() && channelFreqs_.size() == channelLabels_.size()) {
+        rebuildChannelGrid(channelFreqs_, channelLabels_);
+    }
 }
 
 void MainWindow::setStatus(QString status) {

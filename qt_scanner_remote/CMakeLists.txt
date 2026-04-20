@@ -19,8 +19,6 @@ add_executable(qt_scanner_remote
     src/AudioEngine.cpp
     src/WaveformWidget.h
     src/WaveformWidget.cpp
-    src/WaterfallWidget.h
-    src/WaterfallWidget.cpp
 )
 
 target_link_libraries(qt_scanner_remote PRIVATE

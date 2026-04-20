@@ -2,8 +2,10 @@
 #define METADATA_RECEIVER_H
 
 #include <QByteArray>
+#include <QList>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QTcpSocket>
 
 class MetadataReceiver : public QObject {
@@ -15,6 +17,7 @@ class MetadataReceiver : public QObject {
     void close();
 
    signals:
+    void channelsReceived(QList<qint64> freqsHz, QStringList labels);
     void metadataReceived(int device, qint64 freqHz, bool squelchOpen, QString label, quint32 seq);
     void errorMessage(QString message);
 
