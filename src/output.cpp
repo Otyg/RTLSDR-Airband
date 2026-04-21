@@ -376,6 +376,8 @@ static void close_file(output_t* output) {
         if (!FLAC__stream_encoder_finish(output->flac)) {
             log(LOG_WARNING, "Failed to finalize FLAC file %s\n", fdata->file_path.c_str());
         }
+        // init_FILE() gives FILE* ownership to libFLAC; finish() closes it.
+        fdata->f = NULL;
     }
 #endif /* WITH_FLAC_FILE_OUTPUT */
 
