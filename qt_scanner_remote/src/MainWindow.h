@@ -6,20 +6,25 @@
 #include <QHash>
 #include <QList>
 #include <QMainWindow>
+#include <QPointer>
 #include <QResizeEvent>
 #include <QStringList>
 #include <QVector>
 
 #include "AudioEngine.h"
 #include "AudioReceiver.h"
+#include "ChannelWaterfallDialog.h"
 #include "MetadataReceiver.h"
 #include "Mp3FilePlayer.h"
+#include "SpectrumWidget.h"
 #include "WaterfallWidget.h"
 #include "WaveformWidget.h"
 
 QT_BEGIN_NAMESPACE
 class QLabel;
 class QPushButton;
+class QCheckBox;
+class QComboBox;
 class QDoubleSpinBox;
 class QSpinBox;
 class QLineEdit;
@@ -35,6 +40,7 @@ class MainWindow : public QMainWindow {
    public:
     explicit MainWindow(QWidget* parent = nullptr);
     void resizeEvent(QResizeEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
    private slots:
     void startListening();
@@ -59,6 +65,10 @@ class MainWindow : public QMainWindow {
     void appendSquelchLogEntry(QDateTime const& start, qint64 freqHz, QString const& label, qint64 durationMs);
     QVector<float> downsampleForWaveform(QByteArray const& data) const;
     QVector<float> computeWaterfallBins(QByteArray const& data) const;
+    void appendChannelWaterfallFrame(qint64 freqHz, QVector<float> const& bins);
+    void showChannelWaterfallDialog(qint64 freqHz);
+    void refreshAudioOutputDevices();
+    void applySelectedAudioOutput();
 
     AudioReceiver audioReceiver_;
     MetadataReceiver metadataReceiver_;
@@ -71,8 +81,13 @@ class MainWindow : public QMainWindow {
     QSpinBox* metadataPort_;
     QProgressBar* inputLevelBar_;
     WaveformWidget* inputWaveform_;
+    SpectrumWidget* inputSpectrum_;
     WaterfallWidget* inputWaterfall_;
+    QComboBox* audioOutputDeviceSelect_;
     QDoubleSpinBox* noiseSuppressionInput_;
+    QDoubleSpinBox* presenceBoostInput_;
+    QCheckBox* highPassFilterToggle_;
+    QCheckBox* lowPassFilterToggle_;
     QSpinBox* sessionMarkingTimeInput_;
     QGroupBox* scannerGroup_;
     QGridLayout* scannerGrid_;
@@ -84,6 +99,9 @@ class MainWindow : public QMainWindow {
     QPushButton* stopButton_;
     QList<qint64> channelFreqs_;
     QStringList channelLabels_;
+    QHash<qint64, QString> channelLabelByFreq_;
+    QHash<qint64, QList<QVector<float>>> channelWaterfallByFreq_;
+    QHash<qint64, QPointer<ChannelWaterfallDialog>> channelWaterfallDialogs_;
 
     bool squelchOpen_;
     bool localFileMode_;

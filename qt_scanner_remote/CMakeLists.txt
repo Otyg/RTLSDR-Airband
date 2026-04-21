@@ -25,6 +25,8 @@ add_executable(qt_scanner_remote
     src/Theme.h
     src/AudioReceiver.h
     src/AudioReceiver.cpp
+    src/ChannelWaterfallDialog.h
+    src/ChannelWaterfallDialog.cpp
     src/MetadataReceiver.h
     src/MetadataReceiver.cpp
     src/Mp3FilePlayer.h
@@ -33,6 +35,8 @@ add_executable(qt_scanner_remote
     src/AudioEngine.cpp
     src/NoiseReduction.h
     src/NoiseReduction.cpp
+    src/SpectrumWidget.h
+    src/SpectrumWidget.cpp
     src/WaveformWidget.h
     src/WaveformWidget.cpp
     src/WaterfallWidget.h

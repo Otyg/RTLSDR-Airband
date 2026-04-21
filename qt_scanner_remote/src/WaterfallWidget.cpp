@@ -1,5 +1,7 @@
 #include "WaterfallWidget.h"
 
+#include <algorithm>
+#include <cstring>
 #include <QPainter>
 #include <QPaintEvent>
 
@@ -7,6 +9,10 @@ WaterfallWidget::WaterfallWidget(QWidget* parent) : QWidget(parent), bins_(192) 
     setMinimumHeight(140);
     image_ = QImage(bins_, 160, QImage::Format_RGB32);
     image_.fill(QColor(10, 14, 22));
+}
+
+QSize WaterfallWidget::sizeHint() const {
+    return QSize(320, std::max(140, image_.height()));
 }
 
 void WaterfallWidget::appendFrame(QVector<float> const& bins) {
@@ -25,7 +31,34 @@ void WaterfallWidget::appendFrame(QVector<float> const& bins) {
         }
     }
 
-    QRgb* row = reinterpret_cast<QRgb*>(image_.scanLine(0));
+    paintBinsToRow(reinterpret_cast<QRgb*>(image_.scanLine(0)), bins);
+    update();
+}
+
+void WaterfallWidget::setFrames(QList<QVector<float>> const& frames) {
+    int const frameCount = std::max(1, static_cast<int>(frames.size()));
+    image_ = QImage(bins_, frameCount, QImage::Format_RGB32);
+    image_.fill(QColor(10, 14, 22));
+
+    for (int y = 0; y < frames.size(); ++y) {
+        paintBinsToRow(reinterpret_cast<QRgb*>(image_.scanLine(y)), frames[frames.size() - 1 - y]);
+    }
+
+    setMinimumHeight(std::min(240, std::max(140, frameCount)));
+    updateGeometry();
+    update();
+}
+
+void WaterfallWidget::paintEvent(QPaintEvent* event) {
+    Q_UNUSED(event);
+
+    QPainter p(this);
+    p.fillRect(rect(), QColor(10, 14, 22));
+    p.setRenderHint(QPainter::SmoothPixmapTransform, false);
+    p.drawImage(rect(), image_);
+}
+
+void WaterfallWidget::paintBinsToRow(QRgb* row, QVector<float> const& bins) const {
     int const n = bins.size();
     for (int x = 0; x < bins_; ++x) {
         int idx = (x * n) / bins_;
@@ -40,17 +73,6 @@ void WaterfallWidget::appendFrame(QVector<float> const& bins) {
         }
         row[x] = colorForLevel(v);
     }
-
-    update();
-}
-
-void WaterfallWidget::paintEvent(QPaintEvent* event) {
-    Q_UNUSED(event);
-
-    QPainter p(this);
-    p.fillRect(rect(), QColor(10, 14, 22));
-    p.setRenderHint(QPainter::SmoothPixmapTransform, false);
-    p.drawImage(rect(), image_);
 }
 
 QRgb WaterfallWidget::colorForLevel(float level) const {

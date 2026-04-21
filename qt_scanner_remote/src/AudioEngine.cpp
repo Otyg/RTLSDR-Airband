@@ -1,6 +1,7 @@
 #include "AudioEngine.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
@@ -17,6 +18,12 @@ constexpr int kBytesPerSample = static_cast<int>(sizeof(int16_t));
 constexpr int kMinPlaybackDurationMs = 1000;
 constexpr int kMinPlaybackBytes = (kSampleRateHz * kBytesPerSample * kMinPlaybackDurationMs) / 1000;
 constexpr int kMaxPendingBytes = kSampleRateHz * kBytesPerSample * 3 / 10;
+constexpr float kPi = 3.14159265358979323846f;
+constexpr float kHighPassCutoffHz = 250.0f;
+constexpr float kLowPassCutoffHz = 2900.0f;
+constexpr float kPresenceCenterHz = 2000.0f;
+constexpr float kPresenceQ = 2.0f;
+constexpr int kFilterStages = 4;
 }
 
 AudioEngine::AudioEngine(QObject* parent)
@@ -31,7 +38,27 @@ AudioEngine::AudioEngine(QObject* parent)
       playbackActive_(false),
       playbackUnlocked_(false),
       lastWriteFailed_(false),
-      restartPending_(false) {
+      restartPending_(false),
+      highPassFilterEnabled_(false),
+      lowPassFilterEnabled_(false),
+      presenceBoostDb_(0.0f),
+      highPassAlpha_(0.0f),
+      lowPassAlpha_(0.0f),
+      presenceB_{1.0f, 0.0f, 0.0f},
+      presenceA_{1.0f, 0.0f, 0.0f},
+      highPassPrevInput_{},
+      highPassPrevOutput_{},
+      lowPassPrevOutput_{},
+      presencePrevInput1_(0.0f),
+      presencePrevInput2_(0.0f),
+      presencePrevOutput1_(0.0f),
+      presencePrevOutput2_(0.0f) {
+    float const sampleInterval = 1.0f / static_cast<float>(kSampleRateHz);
+    float const highPassRc = 1.0f / (2.0f * kPi * kHighPassCutoffHz);
+    float const lowPassRc = 1.0f / (2.0f * kPi * kLowPassCutoffHz);
+    highPassAlpha_ = highPassRc / (highPassRc + sampleInterval);
+    lowPassAlpha_ = sampleInterval / (lowPassRc + sampleInterval);
+    updatePresenceBoostCoefficients();
     flushTimer_->setInterval(15);
     connect(flushTimer_, &QTimer::timeout, this, [this]() { flushPendingPcm(); });
 }
@@ -49,6 +76,7 @@ bool AudioEngine::start() {
     playbackUnlocked_ = false;
     lastWriteFailed_ = false;
     restartPending_ = false;
+    resetFilterState();
     if (!createSink()) {
         running_ = false;
         return false;
@@ -73,6 +101,7 @@ void AudioEngine::stop() {
     playbackActive_ = false;
     playbackUnlocked_ = false;
     lastWriteFailed_ = false;
+    resetFilterState();
     emit statusMessage("Audio: stopped");
 }
 
@@ -91,6 +120,46 @@ void AudioEngine::setNoiseReductionStrength(float strength) {
     if (noiseReduction_) {
         noiseReduction_->setSuppressionStrength(strength);
     }
+}
+
+void AudioEngine::setHighPassFilterEnabled(bool enabled) {
+    highPassFilterEnabled_ = enabled;
+    resetFilterState();
+}
+
+void AudioEngine::setLowPassFilterEnabled(bool enabled) {
+    lowPassFilterEnabled_ = enabled;
+    resetFilterState();
+}
+
+void AudioEngine::setPresenceBoostDb(float gainDb) {
+    float const clampedGain = std::clamp(gainDb, 0.0f, 4.0f);
+    if (std::fabs(presenceBoostDb_ - clampedGain) < 0.001f) {
+        return;
+    }
+
+    presenceBoostDb_ = clampedGain;
+    updatePresenceBoostCoefficients();
+    resetFilterState();
+}
+
+void AudioEngine::setOutputDeviceId(QByteArray const& deviceId) {
+    if (outputDeviceId_ == deviceId) {
+        return;
+    }
+
+    outputDeviceId_ = deviceId;
+    if (!running_) {
+        return;
+    }
+
+    teardownSink();
+    if (!createSink()) {
+        emit errorMessage("Failed to switch audio output device");
+        return;
+    }
+    flushPendingPcm();
+    emit statusMessage(QString("Audio: %1").arg(stateToText()));
 }
 
 void AudioEngine::setPlaybackActive(bool active) {
@@ -132,6 +201,8 @@ void AudioEngine::pushFloat32Mono(QByteArray data) {
     if (noiseReductionEnabled_ && noiseReduction_ && noiseReduction_->isInitialized()) {
         noiseReduction_->processFrame(out, sampleCount);
     }
+
+    applyFilters(out, sampleCount);
 
     emit pcmChunk(pcm);
     if (!playbackActive_) {
@@ -190,7 +261,7 @@ void AudioEngine::flushPendingPcm() {
 }
 
 bool AudioEngine::createSink() {
-    QAudioDevice output = QMediaDevices::defaultAudioOutput();
+    QAudioDevice output = resolveOutputDevice();
     if (output.isNull()) {
         emit errorMessage("No audio output device available");
         return false;
@@ -227,6 +298,19 @@ bool AudioEngine::createSink() {
         return false;
     }
     return true;
+}
+
+QAudioDevice AudioEngine::resolveOutputDevice() const {
+    QList<QAudioDevice> const outputs = QMediaDevices::audioOutputs();
+    if (!outputDeviceId_.isEmpty()) {
+        for (QAudioDevice const& device : outputs) {
+            if (device.id() == outputDeviceId_) {
+                return device;
+            }
+        }
+    }
+
+    return QMediaDevices::defaultAudioOutput();
 }
 
 void AudioEngine::teardownSink() {
@@ -301,4 +385,79 @@ QString AudioEngine::stateToText() const {
     }
 
     return QString("%1 (%2)").arg(state, error);
+}
+
+void AudioEngine::updatePresenceBoostCoefficients() {
+    if (presenceBoostDb_ <= 0.0f) {
+        presenceB_ = {1.0f, 0.0f, 0.0f};
+        presenceA_ = {1.0f, 0.0f, 0.0f};
+        return;
+    }
+
+    float const a = std::pow(10.0f, presenceBoostDb_ / 40.0f);
+    float const omega = 2.0f * kPi * kPresenceCenterHz / static_cast<float>(kSampleRateHz);
+    float const alpha = std::sin(omega) / (2.0f * kPresenceQ);
+    float const cosOmega = std::cos(omega);
+
+    float const b0 = 1.0f + alpha * a;
+    float const b1 = -2.0f * cosOmega;
+    float const b2 = 1.0f - alpha * a;
+    float const a0 = 1.0f + alpha / a;
+    float const a1 = -2.0f * cosOmega;
+    float const a2 = 1.0f - alpha / a;
+
+    presenceB_ = {b0 / a0, b1 / a0, b2 / a0};
+    presenceA_ = {1.0f, a1 / a0, a2 / a0};
+}
+
+void AudioEngine::resetFilterState() {
+    highPassPrevInput_.fill(0.0f);
+    highPassPrevOutput_.fill(0.0f);
+    lowPassPrevOutput_.fill(0.0f);
+    presencePrevInput1_ = 0.0f;
+    presencePrevInput2_ = 0.0f;
+    presencePrevOutput1_ = 0.0f;
+    presencePrevOutput2_ = 0.0f;
+}
+
+void AudioEngine::applyFilters(int16_t* samples, int sampleCount) {
+    bool const presenceBoostEnabled = presenceBoostDb_ > 0.0f;
+    if ((!highPassFilterEnabled_ && !lowPassFilterEnabled_ && !presenceBoostEnabled) || !samples || sampleCount <= 0) {
+        return;
+    }
+
+    for (int i = 0; i < sampleCount; ++i) {
+        float sample = static_cast<float>(samples[i]) / 32767.0f;
+
+        if (highPassFilterEnabled_) {
+            for (int stage = 0; stage < kFilterStages; ++stage) {
+                float const filtered =
+                    highPassAlpha_ * (highPassPrevOutput_[stage] + sample - highPassPrevInput_[stage]);
+                highPassPrevInput_[stage] = sample;
+                highPassPrevOutput_[stage] = filtered;
+                sample = filtered;
+            }
+        }
+
+        if (lowPassFilterEnabled_) {
+            for (int stage = 0; stage < kFilterStages; ++stage) {
+                lowPassPrevOutput_[stage] += lowPassAlpha_ * (sample - lowPassPrevOutput_[stage]);
+                sample = lowPassPrevOutput_[stage];
+            }
+        }
+
+        if (presenceBoostEnabled) {
+            float const filtered = presenceB_[0] * sample + presenceB_[1] * presencePrevInput1_ +
+                                   presenceB_[2] * presencePrevInput2_ - presenceA_[1] * presencePrevOutput1_ -
+                                   presenceA_[2] * presencePrevOutput2_;
+            presencePrevInput2_ = presencePrevInput1_;
+            presencePrevInput1_ = sample;
+            presencePrevOutput2_ = presencePrevOutput1_;
+            presencePrevOutput1_ = filtered;
+            sample = filtered;
+        }
+
+        sample = std::clamp(sample, -1.0f, 1.0f);
+        samples[i] = static_cast<int16_t>(sample * 32767.0f);
+    }
 }

@@ -1,8 +1,14 @@
 #include "MainWindow.h"
 #include "Theme.h"
 
+#include <QAudioDevice>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QMediaDevices>
+#include <QSignalBlocker>
 #include <algorithm>
 #include <QDoubleSpinBox>
+#include <QEvent>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QFrame>
@@ -18,10 +24,16 @@
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QTimer>
+#include <QVariant>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QMouseEvent>
 #include <cstdint>
 #include <cmath>
+
+namespace {
+constexpr int kMaxChannelWaterfallFrames = 4000;
+}
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), localFileMode_(false) {
     QWidget* central = new QWidget(this);
@@ -55,13 +67,25 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), localFileMode_(fa
     inputLevelBar_->setRange(0, 100);
     inputLevelBar_->setValue(0);
     inputWaveform_ = new WaveformWidget(audioGroup);
+    inputSpectrum_ = new SpectrumWidget(audioGroup);
     inputWaterfall_ = new WaterfallWidget(audioGroup);
+    inputWaterfall_->setMinimumHeight(70);
+    inputWaterfall_->setMaximumHeight(70);
+    inputSpectrum_->setMinimumHeight(70);
+    inputSpectrum_->setMaximumHeight(70);
     QHBoxLayout* scopeLayout = new QHBoxLayout();
     scopeLayout->setSpacing(8);
     scopeLayout->addWidget(inputWaveform_, 1);
-    scopeLayout->addWidget(inputWaterfall_, 1);
+    QVBoxLayout* spectrumLayout = new QVBoxLayout();
+    spectrumLayout->setSpacing(8);
+    spectrumLayout->setContentsMargins(0, 0, 0, 0);
+    spectrumLayout->addWidget(inputSpectrum_);
+    spectrumLayout->addWidget(inputWaterfall_);
+    scopeLayout->addLayout(spectrumLayout, 1);
     audioLayout->addRow("Level", inputLevelBar_);
     audioLayout->addRow("Signal", scopeLayout);
+    audioOutputDeviceSelect_ = new QComboBox(audioGroup);
+    audioLayout->addRow("Output Device", audioOutputDeviceSelect_);
 
     noiseSuppressionInput_ = new QDoubleSpinBox(audioGroup);
     noiseSuppressionInput_->setRange(0.0, 100.0);
@@ -69,6 +93,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), localFileMode_(fa
     noiseSuppressionInput_->setSingleStep(5.0);
     noiseSuppressionInput_->setSuffix("%");
     noiseSuppressionInput_->setValue(70.0);
+
+    presenceBoostInput_ = new QDoubleSpinBox(audioGroup);
+    presenceBoostInput_->setRange(0.0, 4.0);
+    presenceBoostInput_->setDecimals(1);
+    presenceBoostInput_->setSingleStep(0.5);
+    presenceBoostInput_->setSuffix(" dB");
+    presenceBoostInput_->setValue(0.0);
+
+    highPassFilterToggle_ = new QCheckBox("High-pass 250 Hz", audioGroup);
+    highPassFilterToggle_->setChecked(false);
+    lowPassFilterToggle_ = new QCheckBox("Low-pass 2.9 kHz", audioGroup);
+    lowPassFilterToggle_->setChecked(false);
 
     sessionMarkingTimeInput_ = new QSpinBox(audioGroup);
     sessionMarkingTimeInput_->setRange(0, 60000);
@@ -79,6 +115,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), localFileMode_(fa
     QHBoxLayout* audioSettingsLayout = new QHBoxLayout();
     audioSettingsLayout->setSpacing(8);
     audioSettingsLayout->addWidget(noiseSuppressionInput_);
+    audioSettingsLayout->addWidget(new QLabel("1.5-2.5 kHz Boost", audioGroup));
+    audioSettingsLayout->addWidget(presenceBoostInput_);
+    audioSettingsLayout->addWidget(highPassFilterToggle_);
+    audioSettingsLayout->addWidget(lowPassFilterToggle_);
     audioSettingsLayout->addWidget(new QLabel("Session Marking", audioGroup));
     audioSettingsLayout->addWidget(sessionMarkingTimeInput_);
     audioSettingsLayout->addStretch(1);
@@ -120,10 +160,22 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), localFileMode_(fa
     connect(startButton_, &QPushButton::clicked, this, &MainWindow::startListening);
     connect(loadMp3Button_, &QPushButton::clicked, this, &MainWindow::loadMp3File);
     connect(stopButton_, &QPushButton::clicked, this, &MainWindow::stopListening);
+    connect(audioOutputDeviceSelect_, &QComboBox::currentIndexChanged, this, [this](int) {
+        applySelectedAudioOutput();
+    });
     connect(noiseSuppressionInput_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
         float const strength = static_cast<float>(value / 100.0);
         audioEngine_.setNoiseReductionEnabled(strength > 0.0f);
         audioEngine_.setNoiseReductionStrength(strength);
+    });
+    connect(presenceBoostInput_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
+        audioEngine_.setPresenceBoostDb(static_cast<float>(value));
+    });
+    connect(highPassFilterToggle_, &QCheckBox::toggled, this, [this](bool checked) {
+        audioEngine_.setHighPassFilterEnabled(checked);
+    });
+    connect(lowPassFilterToggle_, &QCheckBox::toggled, this, [this](bool checked) {
+        audioEngine_.setLowPassFilterEnabled(checked);
     });
     connect(sessionMarkingTimeInput_, &QSpinBox::valueChanged, this, [this](int value) {
         sessionTrafficHighlightThresholdMs_ = static_cast<qint64>(value);
@@ -145,6 +197,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), localFileMode_(fa
     squelchOpen_ = false;
     squelchFreqHz_ = 0;
     sessionTrafficHighlightThresholdMs_ = Theme::kDefaultSessionTrafficHighlightThresholdMs;
+    refreshAudioOutputDevices();
+    audioEngine_.setHighPassFilterEnabled(highPassFilterToggle_->isChecked());
+    audioEngine_.setLowPassFilterEnabled(lowPassFilterToggle_->isChecked());
+    audioEngine_.setPresenceBoostDb(static_cast<float>(presenceBoostInput_->value()));
+
+    QMediaDevices* mediaDevices = new QMediaDevices(this);
+    connect(mediaDevices, &QMediaDevices::audioOutputsChanged, this, [this]() { refreshAudioOutputDevices(); });
 }
 
 void MainWindow::startListening() {
@@ -232,6 +291,11 @@ void MainWindow::stopListening() {
 void MainWindow::onChannelsReceived(QList<qint64> freqsHz, QStringList labels) {
     channelFreqs_ = freqsHz;
     channelLabels_ = labels;
+    channelLabelByFreq_.clear();
+    int const count = std::min(freqsHz.size(), labels.size());
+    for (int i = 0; i < count; ++i) {
+        channelLabelByFreq_[freqsHz[i]] = labels[i].isEmpty() ? "-" : labels[i];
+    }
     rebuildChannelGrid(freqsHz, labels);
 }
 
@@ -321,8 +385,14 @@ void MainWindow::onAudioChunk(QByteArray pcmData) {
     int const bar = static_cast<int>(std::round(std::fmin(1.0f, rms) * 100.0f));
     inputLevelBar_->setValue(bar);
 
+    QVector<float> const waterfallBins = computeWaterfallBins(floatData);
     inputWaveform_->setSamples(downsampleForWaveform(floatData));
-    inputWaterfall_->appendFrame(computeWaterfallBins(floatData));
+    inputSpectrum_->setBins(waterfallBins);
+    inputWaterfall_->appendFrame(waterfallBins);
+
+    if (squelchOpen_ && squelchFreqHz_ != 0) {
+        appendChannelWaterfallFrame(squelchFreqHz_, waterfallBins);
+    }
 }
 
 QVector<float> MainWindow::downsampleForWaveform(QByteArray const& data) const {
@@ -497,15 +567,20 @@ void MainWindow::rebuildChannelGrid(QList<qint64> const& freqsHz, QStringList co
 
         QFrame* box = new QFrame(scannerGroup_);
         box->setFrameShape(QFrame::StyledPanel);
+        box->setCursor(Qt::PointingHandCursor);
+        box->setProperty("channelFreqHz", QVariant::fromValue(freqHz));
+        box->installEventFilter(this);
         box->setStyleSheet(
             QString(Theme::kChannelBoxStyle).arg(Theme::kChannelBoxBackgroundColor, Theme::kChannelBoxBorderColor));
         QVBoxLayout* boxLayout = new QVBoxLayout(box);
         box->setMinimumWidth(minBoxWidth);
 
         QLabel* labelText = new QLabel(label, box);
+        labelText->setAttribute(Qt::WA_TransparentForMouseEvents, true);
         labelText->setFont(labelFont);
         labelText->setStyleSheet(QString(Theme::kChannelLabelStyle).arg(defaultChannelColor(freqHz)));
         QLabel* freqLabel = new QLabel(freqText, box);
+        freqLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
         freqLabel->setStyleSheet(QString(Theme::kChannelFrequencyStyle).arg(defaultChannelColor(freqHz)));
 
         boxLayout->addWidget(labelText);
@@ -529,6 +604,59 @@ void MainWindow::setStatus(QString status) {
     statusValue_->setText(status);
 }
 
+void MainWindow::refreshAudioOutputDevices() {
+    QByteArray selectedDeviceId;
+    QVariant const currentData = audioOutputDeviceSelect_->currentData();
+    if (currentData.isValid()) {
+        selectedDeviceId = currentData.toByteArray();
+    }
+
+    QAudioDevice const defaultDevice = QMediaDevices::defaultAudioOutput();
+    QList<QAudioDevice> const outputs = QMediaDevices::audioOutputs();
+
+    {
+        QSignalBlocker blocker(audioOutputDeviceSelect_);
+        audioOutputDeviceSelect_->clear();
+
+        int selectedIndex = -1;
+        for (QAudioDevice const& device : outputs) {
+            QString name = device.description();
+            if (device.id() == defaultDevice.id()) {
+                name += " (Default)";
+            }
+
+            audioOutputDeviceSelect_->addItem(name, device.id());
+            int const index = audioOutputDeviceSelect_->count() - 1;
+            if (!selectedDeviceId.isEmpty() && device.id() == selectedDeviceId) {
+                selectedIndex = index;
+            } else if (selectedDeviceId.isEmpty() && device.id() == defaultDevice.id()) {
+                selectedIndex = index;
+            }
+        }
+
+        if (selectedIndex >= 0) {
+            audioOutputDeviceSelect_->setCurrentIndex(selectedIndex);
+            audioOutputDeviceSelect_->setEnabled(true);
+        } else if (audioOutputDeviceSelect_->count() > 0) {
+            audioOutputDeviceSelect_->setCurrentIndex(0);
+            audioOutputDeviceSelect_->setEnabled(true);
+        } else {
+            audioOutputDeviceSelect_->addItem("No output devices available", QByteArray());
+            audioOutputDeviceSelect_->setEnabled(false);
+        }
+    }
+    applySelectedAudioOutput();
+}
+
+void MainWindow::applySelectedAudioOutput() {
+    if (!audioOutputDeviceSelect_->isEnabled()) {
+        audioEngine_.setOutputDeviceId(QByteArray());
+        return;
+    }
+
+    audioEngine_.setOutputDeviceId(audioOutputDeviceSelect_->currentData().toByteArray());
+}
+
 void MainWindow::flushOpenSquelchIfAny() {
     if (!squelchOpen_) {
         return;
@@ -546,4 +674,53 @@ void MainWindow::appendSquelchLogEntry(QDateTime const& start, qint64 freqHz, QS
     QString shownLabel = label.isEmpty() ? "-" : label;
     QString duration = QString::number(static_cast<double>(durationMs) / 1000.0, 'f', 2) + "s";
     squelchLog_->appendPlainText(QString("%1 %2 %3 %4").arg(stamp).arg(mhz, 0, 'f', 3).arg(shownLabel).arg(duration));
+}
+
+void MainWindow::appendChannelWaterfallFrame(qint64 freqHz, QVector<float> const& bins) {
+    QList<QVector<float>>& frames = channelWaterfallByFreq_[freqHz];
+    frames.append(bins);
+    while (frames.size() > kMaxChannelWaterfallFrames) {
+        frames.removeFirst();
+    }
+
+    ChannelWaterfallDialog* dialog = channelWaterfallDialogs_.value(freqHz, nullptr);
+    if (dialog) {
+        dialog->setFrames(frames);
+    }
+}
+
+void MainWindow::showChannelWaterfallDialog(qint64 freqHz) {
+    if (freqHz == 0) {
+        return;
+    }
+
+    ChannelWaterfallDialog* dialog = channelWaterfallDialogs_.value(freqHz, nullptr);
+    if (!dialog) {
+        dialog = new ChannelWaterfallDialog(this);
+        channelWaterfallDialogs_[freqHz] = dialog;
+        connect(dialog, &QObject::destroyed, this, [this, freqHz]() {
+            channelWaterfallDialogs_.remove(freqHz);
+        });
+    }
+
+    dialog->setChannelInfo(freqHz, channelLabelByFreq_.value(freqHz, "-"));
+    dialog->setFrames(channelWaterfallByFreq_.value(freqHz));
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    if (event->type() == QEvent::MouseButtonRelease) {
+        QVariant const freqValue = watched->property("channelFreqHz");
+        if (freqValue.isValid()) {
+            QMouseEvent* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (mouseEvent->button() == Qt::LeftButton) {
+                showChannelWaterfallDialog(freqValue.toLongLong());
+                return true;
+            }
+        }
+    }
+
+    return QMainWindow::eventFilter(watched, event);
 }
