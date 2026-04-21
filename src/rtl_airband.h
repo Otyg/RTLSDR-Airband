@@ -32,6 +32,12 @@
 #include <string>
 
 #include "config.h"
+#ifdef WITH_FLAC_FILE_OUTPUT
+#include <FLAC/stream_encoder.h>
+#endif /* WITH_FLAC_FILE_OUTPUT */
+#ifndef WITH_FLAC_FILE_OUTPUT
+typedef void FLAC__StreamEncoder;
+#endif /* WITH_FLAC_FILE_OUTPUT */
 
 #ifdef WITH_BCM_VC
 #include "hello_fft/gpu_fft.h"
@@ -104,6 +110,9 @@ enum mix_modes { MM_MONO, MM_STEREO };
 enum output_type {
     O_ICECAST,
     O_FILE,
+#ifdef WITH_FLAC_FILE_OUTPUT
+    O_FLAC_FILE,
+#endif /* WITH_FLAC_FILE_OUTPUT */
     O_RAWFILE,
     O_MIXER,
     O_SCAN_META_UDP,
@@ -225,11 +234,14 @@ struct output_t {
     // set to true in order to initialize `lame` and `lamebuf` after config parsing
     // is complete
     bool has_mp3_output;
+    bool has_flac_output;
 
     // lame encoder and buffer for mp3 output. initialized after config parsing
     // if `uses_mp3_output` is true
     lame_t lame;
     unsigned char* lamebuf;
+    FLAC__StreamEncoder* flac;
+    int32_t* flacbuf;
 };
 
 struct freq_tag {
@@ -376,6 +388,7 @@ extern char const* RTL_AIRBAND_VERSION;
 
 // output.cpp
 lame_t airlame_init(mix_modes mixmode, int highpass, int lowpass);
+FLAC__StreamEncoder* flac_encoder_init(mix_modes mixmode);
 void shout_setup(icecast_data* icecast, mix_modes mixmode);
 void disable_device_outputs(device_t* dev);
 void disable_channel_outputs(channel_t* channel);

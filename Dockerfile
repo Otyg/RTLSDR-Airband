@@ -8,6 +8,7 @@ RUN apt-get update && \
       build-essential \
       cmake \
       libmp3lame-dev \
+      libflac-dev \
       libshout3-dev \
       libconfig++-dev \
       libfftw3-dev \
@@ -71,6 +72,7 @@ RUN apt-get update && \
     tini \
     libc6 \
     libmp3lame0 \
+    libflac12 \
     libshout3 \
     libconfig++9v5 \
     libfftw3-single3 \

@@ -56,6 +56,9 @@
 #include <ctime>
 #include <iostream>
 #include <libconfig.h++>
+#ifdef WITH_FLAC_FILE_OUTPUT
+#include <FLAC/stream_encoder.h>
+#endif /* WITH_FLAC_FILE_OUTPUT */
 #include "input-common.h"
 #include "logging.h"
 #include "rtl_airband.h"
@@ -269,6 +272,13 @@ bool init_output(channel_t* channel, output_t* output) {
     if (output->has_mp3_output) {
         output->lame = airlame_init(channel->mode, channel->highpass, channel->lowpass);
         output->lamebuf = (unsigned char*)malloc(sizeof(unsigned char) * LAMEBUF_SIZE);
+    }
+    if (output->has_flac_output) {
+        output->flac = flac_encoder_init(channel->mode);
+        output->flacbuf = (int32_t*)malloc(sizeof(int32_t) * (size_t)WAVE_BATCH * 2);
+        if (!output->flac || !output->flacbuf) {
+            return false;
+        }
     }
     if (output->type == O_ICECAST) {
         shout_setup((icecast_data*)(output->data), channel->mode);
@@ -1161,6 +1171,14 @@ int main(int argc, char* argv[]) {
                 output_t* output = channel->outputs + k;
                 if (output->lame) {
                     lame_close(output->lame);
+                }
+#ifdef WITH_FLAC_FILE_OUTPUT
+                if (output->flac) {
+                    FLAC__stream_encoder_delete(output->flac);
+                }
+#endif /* WITH_FLAC_FILE_OUTPUT */
+                if (output->flacbuf) {
+                    free(output->flacbuf);
                 }
             }
         }

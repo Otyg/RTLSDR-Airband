@@ -85,8 +85,11 @@ static int parse_outputs(libconfig::Setting& outs, channel_t* channel, int i, in
     int oo = 0;
     for (int o = 0; o < channel->output_count; o++) {
         channel->outputs[oo].has_mp3_output = false;
+        channel->outputs[oo].has_flac_output = false;
         channel->outputs[oo].lame = NULL;
         channel->outputs[oo].lamebuf = NULL;
+        channel->outputs[oo].flac = NULL;
+        channel->outputs[oo].flacbuf = NULL;
 
         if (outs[o].exists("disable") && (bool)outs[o]["disable"] == true) {
             continue;
@@ -185,6 +188,62 @@ static int parse_outputs(libconfig::Setting& outs, channel_t* channel, int i, in
                 }
             }
 
+#ifdef WITH_FLAC_FILE_OUTPUT
+        } else if (!strncmp(outs[o]["type"], "flacfile", 8)) {
+            channel->outputs[oo].data = XCALLOC(1, sizeof(struct file_data));
+            channel->outputs[oo].type = O_FLAC_FILE;
+            file_data* fdata = (file_data*)(channel->outputs[oo].data);
+
+            fdata->type = O_FLAC_FILE;
+            if (!outs[o].exists("directory") || !outs[o].exists("filename_template")) {
+                if (parsing_mixers) {
+                    cerr << "Configuration error: mixers.[" << i << "] outputs.[" << o << "]: ";
+                } else {
+                    cerr << "Configuration error: devices.[" << i << "] channels.[" << j << "] outputs.[" << o << "]: ";
+                }
+                cerr << "both directory and filename_template required for flacfile\n";
+                error();
+            }
+            fdata->basedir = outs[o]["directory"].c_str();
+            fdata->basename = outs[o]["filename_template"].c_str();
+            fdata->dated_subdirectories = outs[o].exists("dated_subdirectories") ? (bool)(outs[o]["dated_subdirectories"]) : false;
+            fdata->suffix = ".flac";
+
+            fdata->continuous = outs[o].exists("continuous") ? (bool)(outs[o]["continuous"]) : false;
+            fdata->append = outs[o].exists("append") ? (bool)(outs[o]["append"]) : false;
+            fdata->split_on_transmission = outs[o].exists("split_on_transmission") ? (bool)(outs[o]["split_on_transmission"]) : false;
+            fdata->include_freq = outs[o].exists("include_freq") ? (bool)(outs[o]["include_freq"]) : false;
+
+            channel->outputs[oo].has_flac_output = true;
+
+            if (fdata->append) {
+                if (parsing_mixers) {
+                    cerr << "Configuration error: mixers.[" << i << "] outputs.[" << o << "]: append is not supported for flacfile\n";
+                } else {
+                    cerr << "Configuration error: devices.[" << i << "] channels.[" << j << "] outputs.[" << o << "]: append is not supported for flacfile\n";
+                }
+                error();
+            }
+
+            if (fdata->split_on_transmission) {
+                if (parsing_mixers) {
+                    cerr << "Configuration error: mixers.[" << i << "] outputs.[" << o << "]: split_on_transmission is not allowed for mixers\n";
+                    error();
+                }
+                if (fdata->continuous) {
+                    cerr << "Configuration error: devices.[" << i << "] channels.[" << j << "] outputs.[" << o << "]: can't have both continuous and split_on_transmission\n";
+                    error();
+                }
+            }
+#else
+        } else if (!strncmp(outs[o]["type"], "flacfile", 8)) {
+            if (parsing_mixers) {
+                cerr << "Configuration error: mixers.[" << i << "] outputs.[" << o << "]: flacfile output not available in this build\n";
+            } else {
+                cerr << "Configuration error: devices.[" << i << "] channels.[" << j << "] outputs.[" << o << "]: flacfile output not available in this build\n";
+            }
+            error();
+#endif /* WITH_FLAC_FILE_OUTPUT */
         } else if (!strncmp(outs[o]["type"], "rawfile", 7)) {
             if (parsing_mixers) {  // rawfile outputs not allowed for mixers
                 cerr << "Configuration error: mixers.[" << i << "] outputs[" << o << "]: rawfile output is not allowed for mixers\n";

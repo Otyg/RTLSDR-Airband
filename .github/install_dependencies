@@ -12,6 +12,7 @@ case "${unameOut}" in
             build-essential \
             cmake \
             libmp3lame-dev \
+            libflac-dev \
             libshout3-dev \
             libconfig++-dev \
             libfftw3-dev \
@@ -46,6 +47,7 @@ case "${unameOut}" in
 
         brew install \
             lame \
+            flac \
             libshout \
             libconfig \
             fftw \

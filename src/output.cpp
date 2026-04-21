@@ -48,6 +48,9 @@
 #include <sstream>
 #include <string>
 #include "config.h"
+#ifdef WITH_FLAC_FILE_OUTPUT
+#include <FLAC/stream_encoder.h>
+#endif /* WITH_FLAC_FILE_OUTPUT */
 #include "helper_functions.h"
 #include "input-common.h"
 #include "rtl_airband.h"
@@ -169,6 +172,41 @@ lame_t airlame_init(mix_modes mixmode, int highpass, int lowpass) {
     lame_init_params(lame);
     return lame;
 }
+
+#ifdef WITH_FLAC_FILE_OUTPUT
+FLAC__StreamEncoder* flac_encoder_init(mix_modes mixmode) {
+    FLAC__StreamEncoder* encoder = FLAC__stream_encoder_new();
+    if (!encoder) {
+        log(LOG_WARNING, "FLAC__stream_encoder_new failed\n");
+        return NULL;
+    }
+
+    if (!FLAC__stream_encoder_set_channels(encoder, mixmode == MM_STEREO ? 2 : 1) || !FLAC__stream_encoder_set_bits_per_sample(encoder, 16) ||
+        !FLAC__stream_encoder_set_sample_rate(encoder, WAVE_RATE) || !FLAC__stream_encoder_set_compression_level(encoder, 5)) {
+        log(LOG_WARNING, "Failed to configure FLAC encoder\n");
+        FLAC__stream_encoder_delete(encoder);
+        return NULL;
+    }
+
+    return encoder;
+}
+
+static int32_t float_to_pcm16(float sample) {
+    if (isnan(sample)) {
+        return 0;
+    }
+    if (sample > 1.0f) {
+        sample = 1.0f;
+    } else if (sample < -1.0f) {
+        sample = -1.0f;
+    }
+    return (int32_t)(sample * 32767.0f);
+}
+#else
+FLAC__StreamEncoder* flac_encoder_init(mix_modes) {
+    return NULL;
+}
+#endif /* WITH_FLAC_FILE_OUTPUT */
 
 class LameTone {
     unsigned char* _data;
@@ -333,6 +371,13 @@ static void close_file(output_t* output) {
         fseek(fdata->f, 0, SEEK_SET);
         fwrite(output->lamebuf, 1, lametag_size, fdata->f);
     }
+#ifdef WITH_FLAC_FILE_OUTPUT
+    if (fdata->type == O_FLAC_FILE && fdata->f && output->flac) {
+        if (!FLAC__stream_encoder_finish(output->flac)) {
+            log(LOG_WARNING, "Failed to finalize FLAC file %s\n", fdata->file_path.c_str());
+        }
+    }
+#endif /* WITH_FLAC_FILE_OUTPUT */
 
     if (fdata->f) {
         fclose(fdata->f);
@@ -453,11 +498,26 @@ static bool output_file_ready(channel_t* channel, output_t* output) {
 
     fdata->open_time = fdata->last_write_time = current_time;
 
-    const int is_audio = output->type == O_RAWFILE ? 0 : 1;
+    const int is_audio = output->type == O_FILE ? 1 : 0;
     if (open_file(fdata, channel->mode, is_audio) < 0) {
         log(LOG_WARNING, "Cannot open output file %s (%s)\n", fdata->file_path_tmp.c_str(), strerror(errno));
         return false;
     }
+#ifdef WITH_FLAC_FILE_OUTPUT
+    if (output->type == O_FLAC_FILE) {
+        if (!output->flac) {
+            log(LOG_WARNING, "FLAC encoder is not initialized for %s\n", fdata->file_path.c_str());
+            return false;
+        }
+        FLAC__StreamEncoderInitStatus init_status = FLAC__stream_encoder_init_FILE(output->flac, fdata->f, NULL, NULL);
+        if (init_status != FLAC__STREAM_ENCODER_INIT_STATUS_OK) {
+            log(LOG_WARNING, "Cannot initialize FLAC encoder for %s: %s\n", fdata->file_path.c_str(), FLAC__StreamEncoderInitStatusString[init_status]);
+            fclose(fdata->f);
+            fdata->f = NULL;
+            return false;
+        }
+    }
+#endif /* WITH_FLAC_FILE_OUTPUT */
 
     return true;
 }
@@ -512,7 +572,11 @@ void process_outputs(channel_t* channel, int cur_scan_freq) {
                 }
                 shout_metadata_free(meta);
             }
-        } else if (channel->outputs[k].type == O_FILE || channel->outputs[k].type == O_RAWFILE) {
+        } else if (channel->outputs[k].type == O_FILE || channel->outputs[k].type == O_RAWFILE
+#ifdef WITH_FLAC_FILE_OUTPUT
+                   || channel->outputs[k].type == O_FLAC_FILE
+#endif /* WITH_FLAC_FILE_OUTPUT */
+        ) {
             file_data* fdata = (file_data*)(channel->outputs[k].data);
 
             if (fdata->continuous == false && channel->axcindicate == NO_SIGNAL && channel->outputs[k].active == false) {
@@ -548,6 +612,33 @@ void process_outputs(channel_t* channel, int cur_scan_freq) {
             } else if (channel->outputs[k].type == O_RAWFILE) {
                 buflen = 2 * sizeof(float) * WAVE_BATCH;
                 written = fwrite(channel->iq_out, 1, buflen, fdata->f);
+#ifdef WITH_FLAC_FILE_OUTPUT
+            } else if (channel->outputs[k].type == O_FLAC_FILE) {
+                output_t* output = &channel->outputs[k];
+                if (!output->flac || !output->flacbuf) {
+                    log(LOG_WARNING, "FLAC encoder resources missing for %s\n", fdata->file_path.c_str());
+                    buflen = 1;
+                    written = 0;
+                } else {
+                    if (channel->mode == MM_STEREO) {
+                        for (int i = 0; i < WAVE_BATCH; i++) {
+                            output->flacbuf[2 * i] = float_to_pcm16(channel->waveout[i]);
+                            output->flacbuf[2 * i + 1] = float_to_pcm16(channel->waveout_r[i]);
+                        }
+                    } else {
+                        for (int i = 0; i < WAVE_BATCH; i++) {
+                            output->flacbuf[i] = float_to_pcm16(channel->waveout[i]);
+                        }
+                    }
+                    if (FLAC__stream_encoder_process_interleaved(output->flac, output->flacbuf, WAVE_BATCH)) {
+                        buflen = written = 1;
+                    } else {
+                        buflen = 1;
+                        written = 0;
+                        log(LOG_WARNING, "Failed to encode FLAC block to %s\n", fdata->file_path.c_str());
+                    }
+                }
+#endif /* WITH_FLAC_FILE_OUTPUT */
             }
             if (written < buflen) {
                 if (ferror(fdata->f))
@@ -637,7 +728,11 @@ void disable_channel_outputs(channel_t* channel) {
             shout_close(icecast->shout);
             shout_free(icecast->shout);
             icecast->shout = NULL;
-        } else if (output->type == O_FILE || output->type == O_RAWFILE) {
+        } else if (output->type == O_FILE || output->type == O_RAWFILE
+#ifdef WITH_FLAC_FILE_OUTPUT
+                   || output->type == O_FLAC_FILE
+#endif /* WITH_FLAC_FILE_OUTPUT */
+        ) {
             close_file(&channel->outputs[k]);
         } else if (output->type == O_MIXER) {
             mixer_data* mdata = (mixer_data*)(output->data);
