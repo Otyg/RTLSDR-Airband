@@ -292,6 +292,11 @@ bool init_output(channel_t* channel, output_t* output) {
         if (!udp_stream_init(sdata, channel->mode, (size_t)WAVE_BATCH * sizeof(float))) {
             return false;
         }
+    } else if (output->type == O_UDP_STREAM_SERVER) {
+        udp_stream_server_data* sdata = (udp_stream_server_data*)(output->data);
+        if (!udp_stream_server_init(sdata, channel->mode, (size_t)WAVE_BATCH * sizeof(float))) {
+            return false;
+        }
     } else if (output->type == O_SCAN_META_TCP_SERVER) {
         scan_meta_tcp_server_data* sdata = (scan_meta_tcp_server_data*)(output->data);
         if (!scan_meta_tcp_server_init(sdata)) {
