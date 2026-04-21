@@ -384,6 +384,8 @@ static void close_file(output_t* output) {
     if (fdata->f) {
         fclose(fdata->f);
         fdata->f = NULL;
+    }
+    if (!fdata->file_path_tmp.empty()) {
         rename_if_exists(fdata->file_path_tmp.c_str(), fdata->file_path.c_str());
     }
     fdata->file_path.clear();
