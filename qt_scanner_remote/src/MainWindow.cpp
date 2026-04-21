@@ -1,8 +1,11 @@
 #include "MainWindow.h"
 
 #include <algorithm>
+#include <QDoubleSpinBox>
+#include <QFileDialog>
 #include <QFormLayout>
 #include <QFrame>
+#include <QFontMetrics>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -11,20 +14,22 @@
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
-#include <QSlider>
 #include <QSpinBox>
 #include <QStatusBar>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <cstdint>
 #include <cmath>
 
-MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
+MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), localFileMode_(false) {
     QWidget* central = new QWidget(this);
     QVBoxLayout* root = new QVBoxLayout(central);
 
     QGroupBox* networkGroup = new QGroupBox("Network", central);
-    QFormLayout* networkLayout = new QFormLayout(networkGroup);
+    QGridLayout* networkLayout = new QGridLayout(networkGroup);
+    networkLayout->setHorizontalSpacing(10);
+    networkLayout->setVerticalSpacing(4);
     backendHost_ = new QLineEdit(networkGroup);
     backendHost_->setText("127.0.0.1");
     audioPort_ = new QSpinBox(networkGroup);
@@ -33,22 +38,37 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     metadataPort_ = new QSpinBox(networkGroup);
     metadataPort_->setRange(1, 65535);
     metadataPort_->setValue(9001);
-    networkLayout->addRow("Backend host", backendHost_);
-    networkLayout->addRow("Audio TCP port", audioPort_);
-    networkLayout->addRow("Metadata TCP port", metadataPort_);
+    networkLayout->addWidget(new QLabel("Backend host", networkGroup), 0, 0);
+    networkLayout->addWidget(new QLabel("Audio TCP port", networkGroup), 0, 1);
+    networkLayout->addWidget(new QLabel("Metadata TCP port", networkGroup), 0, 2);
+    networkLayout->addWidget(backendHost_, 1, 0);
+    networkLayout->addWidget(audioPort_, 1, 1);
+    networkLayout->addWidget(metadataPort_, 1, 2);
+    networkLayout->setColumnStretch(0, 2);
+    networkLayout->setColumnStretch(1, 1);
+    networkLayout->setColumnStretch(2, 1);
 
     QGroupBox* audioGroup = new QGroupBox("Audio", central);
     QFormLayout* audioLayout = new QFormLayout(audioGroup);
-    volume_ = new QSlider(Qt::Horizontal, audioGroup);
-    volume_->setRange(0, 100);
-    volume_->setValue(100);
     inputLevelBar_ = new QProgressBar(audioGroup);
     inputLevelBar_->setRange(0, 100);
     inputLevelBar_->setValue(0);
     inputWaveform_ = new WaveformWidget(audioGroup);
-    audioLayout->addRow("Volume", volume_);
+    inputWaterfall_ = new WaterfallWidget(audioGroup);
+    QHBoxLayout* scopeLayout = new QHBoxLayout();
+    scopeLayout->setSpacing(8);
+    scopeLayout->addWidget(inputWaveform_, 1);
+    scopeLayout->addWidget(inputWaterfall_, 1);
     audioLayout->addRow("Level", inputLevelBar_);
-    audioLayout->addRow("Waveform", inputWaveform_);
+    audioLayout->addRow("Signal", scopeLayout);
+
+    noiseSuppressionInput_ = new QDoubleSpinBox(audioGroup);
+    noiseSuppressionInput_->setRange(0.0, 100.0);
+    noiseSuppressionInput_->setDecimals(0);
+    noiseSuppressionInput_->setSingleStep(5.0);
+    noiseSuppressionInput_->setSuffix("%");
+    noiseSuppressionInput_->setValue(70.0);
+    audioLayout->addRow("Noise Suppression", noiseSuppressionInput_);
 
     statusValue_ = new QLabel("Idle", central);
     scannerGroup_ = new QGroupBox("Scanner Channels", central);
@@ -65,9 +85,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     QHBoxLayout* controls = new QHBoxLayout();
     startButton_ = new QPushButton("Start", central);
+    loadMp3Button_ = new QPushButton("Load MP3", central);
     stopButton_ = new QPushButton("Stop", central);
     stopButton_->setEnabled(false);
     controls->addWidget(startButton_);
+    controls->addWidget(loadMp3Button_);
     controls->addWidget(stopButton_);
 
     root->addWidget(networkGroup);
@@ -82,9 +104,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     statusBar()->showMessage("Ready");
 
     connect(startButton_, &QPushButton::clicked, this, &MainWindow::startListening);
+    connect(loadMp3Button_, &QPushButton::clicked, this, &MainWindow::loadMp3File);
     connect(stopButton_, &QPushButton::clicked, this, &MainWindow::stopListening);
-    connect(volume_, &QSlider::valueChanged, this, [this](int v) {
-        audioEngine_.setVolume(static_cast<float>(v) / 100.0f);
+    connect(noiseSuppressionInput_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
+        float const strength = static_cast<float>(value / 100.0);
+        audioEngine_.setNoiseReductionEnabled(strength > 0.0f);
+        audioEngine_.setNoiseReductionStrength(strength);
     });
 
     connect(&audioReceiver_, &AudioReceiver::audioChunk, &audioEngine_, &AudioEngine::pushFloat32Mono);
@@ -95,12 +120,19 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(&audioReceiver_, &AudioReceiver::errorMessage, this, &MainWindow::onError);
     connect(&metadataReceiver_, &MetadataReceiver::errorMessage, this, &MainWindow::onError);
     connect(&audioEngine_, &AudioEngine::errorMessage, this, &MainWindow::onError);
+    connect(&mp3FilePlayer_, &Mp3FilePlayer::audioChunk, &audioEngine_, &AudioEngine::pushFloat32Mono);
+    connect(&mp3FilePlayer_, &Mp3FilePlayer::errorMessage, this, &MainWindow::onError);
+    connect(&mp3FilePlayer_, &Mp3FilePlayer::playbackStarted, this, &MainWindow::onMp3PlaybackStarted);
+    connect(&mp3FilePlayer_, &Mp3FilePlayer::playbackFinished, this, &MainWindow::onMp3PlaybackFinished);
 
     squelchOpen_ = false;
     squelchFreqHz_ = 0;
 }
 
 void MainWindow::startListening() {
+    if (localFileMode_ || mp3FilePlayer_.isActive()) {
+        stopListening();
+    }
     if (!audioEngine_.start()) {
         return;
     }
@@ -122,19 +154,56 @@ void MainWindow::startListening() {
         return;
     }
 
+    audioEngine_.setPlaybackActive(false);
+
     startButton_->setEnabled(false);
+    loadMp3Button_->setEnabled(false);
     stopButton_->setEnabled(true);
     setStatus("Listening");
     statusBar()->showMessage(QString("Connected to %1").arg(host));
+}
+
+void MainWindow::loadMp3File() {
+    QString const filePath = QFileDialog::getOpenFileName(this, "Open MP3 File", QString(), "MP3 files (*.mp3)");
+    if (filePath.isEmpty()) {
+        return;
+    }
+
+    if (!startButton_->isEnabled() || localFileMode_ || mp3FilePlayer_.isActive()) {
+        stopListening();
+    }
+
+    if (!audioEngine_.start()) {
+        return;
+    }
+
+    localFileMode_ = true;
+    audioEngine_.setPlaybackActive(true);
+    if (!mp3FilePlayer_.start(filePath)) {
+        localFileMode_ = false;
+        audioEngine_.setPlaybackActive(false);
+        audioEngine_.stop();
+        return;
+    }
+
+    startButton_->setEnabled(false);
+    loadMp3Button_->setEnabled(false);
+    stopButton_->setEnabled(true);
+    setStatus("Loading MP3");
+    statusBar()->showMessage(QString("Loading %1").arg(filePath));
 }
 
 void MainWindow::stopListening() {
     flushOpenSquelchIfAny();
     metadataReceiver_.close();
     audioReceiver_.close();
+    mp3FilePlayer_.stop();
+    audioEngine_.setPlaybackActive(false);
     audioEngine_.stop();
+    localFileMode_ = false;
 
     startButton_->setEnabled(true);
+    loadMp3Button_->setEnabled(true);
     stopButton_->setEnabled(false);
     setStatus("Stopped");
     statusBar()->showMessage("Stopped");
@@ -158,6 +227,7 @@ void MainWindow::onMetadata(int device, qint64 freqHz, bool squelchOpen, QString
         // Scan: middle shade between default and traffic.
         setChannelTextColor(freqHz, squelchOpen ? "#39ff14" : "#2aa54a");
     }
+    audioEngine_.setPlaybackActive(squelchOpen);
 
     QDateTime now = QDateTime::currentDateTime();
     bool sameSignal = squelchOpen_ && squelchFreqHz_ == freqHz && squelchLabel_ == label;
@@ -186,6 +256,29 @@ void MainWindow::onError(QString message) {
     statusBar()->showMessage(message);
 }
 
+void MainWindow::onMp3PlaybackStarted() {
+    setStatus("Playing file");
+    statusBar()->showMessage("Playing MP3 through audio chain");
+}
+
+void MainWindow::onMp3PlaybackFinished() {
+    if (!localFileMode_) {
+        return;
+    }
+    localFileMode_ = false;
+    audioEngine_.setPlaybackActive(false);
+    startButton_->setEnabled(true);
+    loadMp3Button_->setEnabled(true);
+    stopButton_->setEnabled(false);
+    setStatus("Stopped");
+    statusBar()->showMessage("MP3 playback finished");
+    QTimer::singleShot(400, this, [this]() {
+        if (!localFileMode_ && !mp3FilePlayer_.isActive()) {
+            audioEngine_.stop();
+        }
+    });
+}
+
 void MainWindow::onAudioChunk(QByteArray pcmData) {
     if (pcmData.isEmpty() || pcmData.size() % static_cast<int>(sizeof(int16_t)) != 0) {
         return;
@@ -209,6 +302,7 @@ void MainWindow::onAudioChunk(QByteArray pcmData) {
     inputLevelBar_->setValue(bar);
 
     inputWaveform_->setSamples(downsampleForWaveform(floatData));
+    inputWaterfall_->appendFrame(computeWaterfallBins(floatData));
 }
 
 QVector<float> MainWindow::downsampleForWaveform(QByteArray const& data) const {
@@ -250,6 +344,46 @@ QVector<float> MainWindow::downsampleForWaveform(QByteArray const& data) const {
     return out;
 }
 
+QVector<float> MainWindow::computeWaterfallBins(QByteArray const& data) const {
+    constexpr float kPi = 3.14159265358979323846f;
+    int const sampleCount = data.size() / static_cast<int>(sizeof(float));
+    float const* in = reinterpret_cast<float const*>(data.constData());
+
+    int const fftSize = std::min(sampleCount, 512);
+    int const binCount = 192;
+    QVector<float> bins;
+    bins.resize(binCount);
+    if (fftSize < 32) {
+        std::fill(bins.begin(), bins.end(), 0.0f);
+        return bins;
+    }
+
+    int const startOffset = sampleCount - fftSize;
+    float maxMagnitude = 1e-6f;
+    for (int bin = 0; bin < binCount; ++bin) {
+        double const center = static_cast<double>(bin) * (fftSize / 2.0) / binCount;
+        float real = 0.0f;
+        float imag = 0.0f;
+        for (int n = 0; n < fftSize; ++n) {
+            float const sample = in[startOffset + n];
+            float const window = 0.5f - 0.5f * std::cos((2.0f * kPi * n) / (fftSize - 1));
+            float const phase = static_cast<float>((2.0 * kPi * center * n) / fftSize);
+            real += sample * window * std::cos(phase);
+            imag -= sample * window * std::sin(phase);
+        }
+        float const magnitude = std::sqrt(real * real + imag * imag);
+        bins[bin] = magnitude;
+        if (magnitude > maxMagnitude) {
+            maxMagnitude = magnitude;
+        }
+    }
+
+    for (float& value : bins) {
+        value = std::clamp(std::log10(1.0f + 9.0f * (value / maxMagnitude)), 0.0f, 1.0f);
+    }
+    return bins;
+}
+
 void MainWindow::clearChannelGrid() {
     if (!scannerGrid_) {
         return;
@@ -288,8 +422,31 @@ void MainWindow::rebuildChannelGrid(QList<qint64> const& freqsHz, QStringList co
     if (availableWidth <= 0) {
         availableWidth = width();
     }
-    int const minBoxWidth = 190;
-    int cols = std::max(1, availableWidth / minBoxWidth);
+
+    QFont labelFont;
+    labelFont.setBold(true);
+    QFontMetrics labelMetrics(labelFont);
+    QFontMetrics freqMetrics(font());
+
+    int maxTextWidth = 0;
+    for (int i = 0; i < count; ++i) {
+        qint64 const freqHz = freqsHz[i];
+        QString const label = labels[i].isEmpty() ? "-" : labels[i];
+        QString const freqText = QString::number(static_cast<double>(freqHz) / 1000000.0, 'f', 3) + " MHz";
+        maxTextWidth = std::max(maxTextWidth, labelMetrics.horizontalAdvance(label));
+        maxTextWidth = std::max(maxTextWidth, freqMetrics.horizontalAdvance(freqText));
+    }
+
+    QMargins const gridMargins = scannerGrid_->contentsMargins();
+    int const gridSpacing = scannerGrid_->horizontalSpacing() >= 0 ? scannerGrid_->horizontalSpacing() : scannerGrid_->spacing();
+    int const boxHorizontalPadding = 18;
+    int const minBoxWidth = std::max(150, maxTextWidth + boxHorizontalPadding * 2);
+    int const contentWidth = std::max(1, availableWidth - gridMargins.left() - gridMargins.right());
+
+    int cols = 1;
+    while ((cols + 1) * minBoxWidth + cols * gridSpacing <= contentWidth) {
+        ++cols;
+    }
 
     for (int i = 0; i < count; ++i) {
         qint64 freqHz = freqsHz[i];
@@ -300,8 +457,10 @@ void MainWindow::rebuildChannelGrid(QList<qint64> const& freqsHz, QStringList co
         box->setFrameShape(QFrame::StyledPanel);
         box->setStyleSheet("QFrame { background:#111827; border:1px solid #2a3345; border-radius:8px; }");
         QVBoxLayout* boxLayout = new QVBoxLayout(box);
+        box->setMinimumWidth(minBoxWidth);
 
         QLabel* labelText = new QLabel(label, box);
+        labelText->setFont(labelFont);
         labelText->setStyleSheet("font-weight:600; color:#1e3227;");
         QLabel* freqLabel = new QLabel(freqText, box);
         freqLabel->setStyleSheet("color:#1e3227;");

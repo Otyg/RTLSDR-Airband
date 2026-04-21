@@ -4,6 +4,9 @@
 #include <QByteArray>
 #include <QObject>
 #include <QString>
+#include <memory>
+
+#include "NoiseReduction.h"
 
 QT_BEGIN_NAMESPACE
 class QAudioSink;
@@ -21,6 +24,9 @@ class AudioEngine : public QObject {
     bool start();
     void stop();
     void setVolume(float volume);
+    void setNoiseReductionEnabled(bool enabled);
+    void setNoiseReductionStrength(float strength);
+    void setPlaybackActive(bool active);
 
    public slots:
     void pushFloat32Mono(QByteArray data);
@@ -37,11 +43,17 @@ class AudioEngine : public QObject {
     QTimer* flushTimer_;
     float volume_;
     bool running_;
+    std::unique_ptr<NoiseReduction> noiseReduction_;
+    bool noiseReductionEnabled_;
+    QByteArray gatedPcm_;
+    bool playbackActive_;
+    bool playbackUnlocked_;
     bool lastWriteFailed_;
     bool restartPending_;
     bool createSink();
     void teardownSink();
     void scheduleSinkRestart(QString const& reason);
+    void appendPendingPcm(QByteArray const& pcm);
     void flushPendingPcm();
     QString stateToText() const;
 };

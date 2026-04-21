@@ -11,8 +11,27 @@
 #include <QMediaDevices>
 #include <QTimer>
 
+namespace {
+constexpr int kSampleRateHz = 16000;
+constexpr int kBytesPerSample = static_cast<int>(sizeof(int16_t));
+constexpr int kMinPlaybackDurationMs = 1000;
+constexpr int kMinPlaybackBytes = (kSampleRateHz * kBytesPerSample * kMinPlaybackDurationMs) / 1000;
+constexpr int kMaxPendingBytes = kSampleRateHz * kBytesPerSample * 3 / 10;
+}
+
 AudioEngine::AudioEngine(QObject* parent)
-    : QObject(parent), sink_(nullptr), outputDevice_(nullptr), flushTimer_(new QTimer(this)), volume_(1.0f), running_(false), lastWriteFailed_(false), restartPending_(false) {
+    : QObject(parent),
+      sink_(nullptr),
+      outputDevice_(nullptr),
+      flushTimer_(new QTimer(this)),
+      volume_(1.0f),
+      running_(false),
+      noiseReduction_(std::make_unique<NoiseReduction>(0.7f)),
+      noiseReductionEnabled_(true),
+      playbackActive_(false),
+      playbackUnlocked_(false),
+      lastWriteFailed_(false),
+      restartPending_(false) {
     flushTimer_->setInterval(15);
     connect(flushTimer_, &QTimer::timeout, this, [this]() { flushPendingPcm(); });
 }
@@ -25,6 +44,9 @@ bool AudioEngine::start() {
     stop();
     running_ = true;
     pendingPcm_.clear();
+    gatedPcm_.clear();
+    playbackActive_ = false;
+    playbackUnlocked_ = false;
     lastWriteFailed_ = false;
     restartPending_ = false;
     if (!createSink()) {
@@ -47,6 +69,9 @@ void AudioEngine::stop() {
     }
     outputDevice_ = nullptr;
     pendingPcm_.clear();
+    gatedPcm_.clear();
+    playbackActive_ = false;
+    playbackUnlocked_ = false;
     lastWriteFailed_ = false;
     emit statusMessage("Audio: stopped");
 }
@@ -55,6 +80,32 @@ void AudioEngine::setVolume(float volume) {
     volume_ = std::clamp(volume, 0.0f, 1.0f);
     if (sink_) {
         sink_->setVolume(volume_);
+    }
+}
+
+void AudioEngine::setNoiseReductionEnabled(bool enabled) {
+    noiseReductionEnabled_ = enabled;
+}
+
+void AudioEngine::setNoiseReductionStrength(float strength) {
+    if (noiseReduction_) {
+        noiseReduction_->setSuppressionStrength(strength);
+    }
+}
+
+void AudioEngine::setPlaybackActive(bool active) {
+    if (playbackActive_ == active) {
+        return;
+    }
+
+    playbackActive_ = active;
+    if (!playbackActive_) {
+        gatedPcm_.clear();
+        pendingPcm_.clear();
+        playbackUnlocked_ = false;
+    } else {
+        gatedPcm_.clear();
+        playbackUnlocked_ = false;
     }
 }
 
@@ -67,6 +118,7 @@ void AudioEngine::pushFloat32Mono(QByteArray data) {
     }
 
     int sampleCount = data.size() / static_cast<int>(sizeof(float));
+
     QByteArray pcm;
     pcm.resize(sampleCount * static_cast<int>(sizeof(int16_t)));
 
@@ -77,14 +129,35 @@ void AudioEngine::pushFloat32Mono(QByteArray data) {
         out[i] = static_cast<int16_t>(v * 32767.0f);
     }
 
-    emit pcmChunk(pcm);
-    pendingPcm_.append(pcm);
-    // Cap queued audio to keep latency bounded (~300 ms).
-    static const int maxPendingBytes = 16000 * 2 * 3 / 10;
-    if (pendingPcm_.size() > maxPendingBytes) {
-        pendingPcm_.remove(0, pendingPcm_.size() - maxPendingBytes);
+    if (noiseReductionEnabled_ && noiseReduction_ && noiseReduction_->isInitialized()) {
+        noiseReduction_->processFrame(out, sampleCount);
     }
+
+    emit pcmChunk(pcm);
+    if (!playbackActive_) {
+        return;
+    }
+
+    if (!playbackUnlocked_) {
+        gatedPcm_.append(pcm);
+        if (gatedPcm_.size() < kMinPlaybackBytes) {
+            return;
+        }
+        playbackUnlocked_ = true;
+        appendPendingPcm(gatedPcm_);
+        gatedPcm_.clear();
+    } else {
+        appendPendingPcm(pcm);
+    }
+
     flushPendingPcm();
+}
+
+void AudioEngine::appendPendingPcm(QByteArray const& pcm) {
+    pendingPcm_.append(pcm);
+    if (pendingPcm_.size() > kMaxPendingBytes) {
+        pendingPcm_.remove(0, pendingPcm_.size() - kMaxPendingBytes);
+    }
 }
 
 void AudioEngine::flushPendingPcm() {
@@ -124,7 +197,7 @@ bool AudioEngine::createSink() {
     }
 
     QAudioFormat format;
-    format.setSampleRate(16000);
+    format.setSampleRate(kSampleRateHz);
     format.setChannelCount(1);
     format.setSampleFormat(QAudioFormat::Int16);
 
@@ -134,7 +207,7 @@ bool AudioEngine::createSink() {
     }
 
     sink_ = new QAudioSink(output, format, this);
-    sink_->setBufferSize(16000 * 2 / 10);
+    sink_->setBufferSize(kSampleRateHz * kBytesPerSample / 10);
     sink_->setVolume(volume_);
     connect(sink_, &QAudioSink::stateChanged, this, [this](QAudio::State state) {
         emit statusMessage(QString("Audio: %1").arg(stateToText()));
