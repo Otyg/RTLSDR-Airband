@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "Theme.h"
 
 #include <algorithm>
 #include <QDoubleSpinBox>
@@ -68,7 +69,20 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), localFileMode_(fa
     noiseSuppressionInput_->setSingleStep(5.0);
     noiseSuppressionInput_->setSuffix("%");
     noiseSuppressionInput_->setValue(70.0);
-    audioLayout->addRow("Noise Suppression", noiseSuppressionInput_);
+
+    sessionMarkingTimeInput_ = new QSpinBox(audioGroup);
+    sessionMarkingTimeInput_->setRange(0, 60000);
+    sessionMarkingTimeInput_->setSingleStep(250);
+    sessionMarkingTimeInput_->setSuffix(" ms");
+    sessionMarkingTimeInput_->setValue(static_cast<int>(Theme::kDefaultSessionTrafficHighlightThresholdMs));
+
+    QHBoxLayout* audioSettingsLayout = new QHBoxLayout();
+    audioSettingsLayout->setSpacing(8);
+    audioSettingsLayout->addWidget(noiseSuppressionInput_);
+    audioSettingsLayout->addWidget(new QLabel("Session Marking", audioGroup));
+    audioSettingsLayout->addWidget(sessionMarkingTimeInput_);
+    audioSettingsLayout->addStretch(1);
+    audioLayout->addRow("Noise Suppression", audioSettingsLayout);
 
     statusValue_ = new QLabel("Idle", central);
     scannerGroup_ = new QGroupBox("Scanner Channels", central);
@@ -111,6 +125,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), localFileMode_(fa
         audioEngine_.setNoiseReductionEnabled(strength > 0.0f);
         audioEngine_.setNoiseReductionStrength(strength);
     });
+    connect(sessionMarkingTimeInput_, &QSpinBox::valueChanged, this, [this](int value) {
+        sessionTrafficHighlightThresholdMs_ = static_cast<qint64>(value);
+    });
 
     connect(&audioReceiver_, &AudioReceiver::audioChunk, &audioEngine_, &AudioEngine::pushFloat32Mono);
     connect(&audioEngine_, &AudioEngine::pcmChunk, this, &MainWindow::onAudioChunk);
@@ -127,12 +144,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), localFileMode_(fa
 
     squelchOpen_ = false;
     squelchFreqHz_ = 0;
+    sessionTrafficHighlightThresholdMs_ = Theme::kDefaultSessionTrafficHighlightThresholdMs;
 }
 
 void MainWindow::startListening() {
     if (localFileMode_ || mp3FilePlayer_.isActive()) {
         stopListening();
     }
+    resetSessionTrafficState();
     if (!audioEngine_.start()) {
         return;
     }
@@ -205,6 +224,7 @@ void MainWindow::stopListening() {
     startButton_->setEnabled(true);
     loadMp3Button_->setEnabled(true);
     stopButton_->setEnabled(false);
+    resetSessionTrafficState();
     setStatus("Stopped");
     statusBar()->showMessage("Stopped");
 }
@@ -219,13 +239,11 @@ void MainWindow::onMetadata(int device, qint64 freqHz, bool squelchOpen, QString
     Q_UNUSED(device);
     Q_UNUSED(seq);
 
-    // Default: just above background, green-tinted.
     for (qint64 f : textByFreq_.keys()) {
-        setChannelTextColor(f, "#1e3227");
+        setChannelTextColor(f, defaultChannelColor(f));
     }
     if (textByFreq_.contains(freqHz)) {
-        // Scan: middle shade between default and traffic.
-        setChannelTextColor(freqHz, squelchOpen ? "#39ff14" : "#2aa54a");
+        setChannelTextColor(freqHz, squelchOpen ? Theme::kActiveChannelColor : Theme::kScannedChannelColor);
     }
     audioEngine_.setPlaybackActive(squelchOpen);
 
@@ -240,6 +258,7 @@ void MainWindow::onMetadata(int device, qint64 freqHz, bool squelchOpen, QString
             squelchLabel_ = label;
         } else if (!sameSignal) {
             qint64 durationMs = squelchStart_.msecsTo(now);
+            recordSquelchDuration(squelchFreqHz_, durationMs);
             appendSquelchLogEntry(squelchStart_, squelchFreqHz_, squelchLabel_, durationMs);
             squelchStart_ = now;
             squelchFreqHz_ = freqHz;
@@ -247,6 +266,7 @@ void MainWindow::onMetadata(int device, qint64 freqHz, bool squelchOpen, QString
         }
     } else if (squelchOpen_) {
         qint64 durationMs = squelchStart_.msecsTo(now);
+        recordSquelchDuration(squelchFreqHz_, durationMs);
         appendSquelchLogEntry(squelchStart_, squelchFreqHz_, squelchLabel_, durationMs);
         squelchOpen_ = false;
     }
@@ -404,9 +424,31 @@ void MainWindow::setChannelTextColor(qint64 freqHz, QString const& color) {
     }
     for (QLabel* label : textByFreq_[freqHz]) {
         if (label) {
-            label->setStyleSheet(QString("color:%1;").arg(color));
+            label->setStyleSheet(QString(Theme::kChannelFrequencyStyle).arg(color));
         }
     }
+}
+
+QString MainWindow::defaultChannelColor(qint64 freqHz) const {
+    return sessionLongSignalByFreq_.value(freqHz, false)
+               ? Theme::kSessionTrafficChannelColor
+               : Theme::kDefaultChannelColor;
+}
+
+void MainWindow::resetSessionTrafficState() {
+    sessionLongSignalByFreq_.clear();
+    for (qint64 freqHz : textByFreq_.keys()) {
+        setChannelTextColor(freqHz, defaultChannelColor(freqHz));
+    }
+}
+
+void MainWindow::recordSquelchDuration(qint64 freqHz, qint64 durationMs) {
+    if (freqHz == 0 || durationMs < sessionTrafficHighlightThresholdMs_) {
+        return;
+    }
+
+    sessionLongSignalByFreq_[freqHz] = true;
+    setChannelTextColor(freqHz, defaultChannelColor(freqHz));
 }
 
 void MainWindow::rebuildChannelGrid(QList<qint64> const& freqsHz, QStringList const& labels) {
@@ -455,15 +497,16 @@ void MainWindow::rebuildChannelGrid(QList<qint64> const& freqsHz, QStringList co
 
         QFrame* box = new QFrame(scannerGroup_);
         box->setFrameShape(QFrame::StyledPanel);
-        box->setStyleSheet("QFrame { background:#111827; border:1px solid #2a3345; border-radius:8px; }");
+        box->setStyleSheet(
+            QString(Theme::kChannelBoxStyle).arg(Theme::kChannelBoxBackgroundColor, Theme::kChannelBoxBorderColor));
         QVBoxLayout* boxLayout = new QVBoxLayout(box);
         box->setMinimumWidth(minBoxWidth);
 
         QLabel* labelText = new QLabel(label, box);
         labelText->setFont(labelFont);
-        labelText->setStyleSheet("font-weight:600; color:#1e3227;");
+        labelText->setStyleSheet(QString(Theme::kChannelLabelStyle).arg(defaultChannelColor(freqHz)));
         QLabel* freqLabel = new QLabel(freqText, box);
-        freqLabel->setStyleSheet("color:#1e3227;");
+        freqLabel->setStyleSheet(QString(Theme::kChannelFrequencyStyle).arg(defaultChannelColor(freqHz)));
 
         boxLayout->addWidget(labelText);
         boxLayout->addWidget(freqLabel);
@@ -492,6 +535,7 @@ void MainWindow::flushOpenSquelchIfAny() {
     }
     QDateTime now = QDateTime::currentDateTime();
     qint64 durationMs = squelchStart_.msecsTo(now);
+    recordSquelchDuration(squelchFreqHz_, durationMs);
     appendSquelchLogEntry(squelchStart_, squelchFreqHz_, squelchLabel_, durationMs);
     squelchOpen_ = false;
 }

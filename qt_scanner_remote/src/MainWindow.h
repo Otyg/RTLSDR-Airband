@@ -52,6 +52,9 @@ class MainWindow : public QMainWindow {
     void rebuildChannelGrid(QList<qint64> const& freqsHz, QStringList const& labels);
     void clearChannelGrid();
     void setChannelTextColor(qint64 freqHz, QString const& color);
+    QString defaultChannelColor(qint64 freqHz) const;
+    void resetSessionTrafficState();
+    void recordSquelchDuration(qint64 freqHz, qint64 durationMs);
     void flushOpenSquelchIfAny();
     void appendSquelchLogEntry(QDateTime const& start, qint64 freqHz, QString const& label, qint64 durationMs);
     QVector<float> downsampleForWaveform(QByteArray const& data) const;
@@ -70,9 +73,11 @@ class MainWindow : public QMainWindow {
     WaveformWidget* inputWaveform_;
     WaterfallWidget* inputWaterfall_;
     QDoubleSpinBox* noiseSuppressionInput_;
+    QSpinBox* sessionMarkingTimeInput_;
     QGroupBox* scannerGroup_;
     QGridLayout* scannerGrid_;
     QHash<qint64, QList<QLabel*>> textByFreq_;
+    QHash<qint64, bool> sessionLongSignalByFreq_;
     QPlainTextEdit* squelchLog_;
     QPushButton* startButton_;
     QPushButton* loadMp3Button_;
@@ -82,6 +87,7 @@ class MainWindow : public QMainWindow {
 
     bool squelchOpen_;
     bool localFileMode_;
+    qint64 sessionTrafficHighlightThresholdMs_;
     QDateTime squelchStart_;
     qint64 squelchFreqHz_;
     QString squelchLabel_;
