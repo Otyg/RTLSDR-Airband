@@ -245,6 +245,8 @@ struct file_cmd_tcp_server_data {
     bool playback_decoder_eof;
     std::string playback_file_path;
     std::vector<unsigned char> playback_pcm16_buffer;
+    bool playback_waiting_for_first_chunk;
+    uint32_t playback_noise_state;
 };
 
 #ifdef WITH_PULSEAUDIO

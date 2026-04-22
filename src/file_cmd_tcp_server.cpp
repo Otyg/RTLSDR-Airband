@@ -262,6 +262,7 @@ static void clear_decoder_process(file_cmd_tcp_server_data* sdata) {
 static void stop_playback(file_cmd_tcp_server_data* sdata) {
     sdata->playback_active = false;
     sdata->playback_loop = false;
+    sdata->playback_waiting_for_first_chunk = false;
     sdata->playback_file_path.clear();
     clear_decoder_process(sdata);
 }
@@ -355,7 +356,36 @@ static bool start_playback(file_cmd_tcp_server_data* sdata, std::string const& f
     }
 
     sdata->playback_file_path = file_path;
+    sdata->playback_waiting_for_first_chunk = true;
     return true;
+}
+
+static void send_playback_samples(file_cmd_tcp_server_data* sdata, float const* mono, size_t sample_count) {
+    size_t const bytes = sample_count * sizeof(float);
+    if (sdata->playback_mode == MM_MONO) {
+        if (sdata->playback_udp_stream != NULL) {
+            udp_stream_write(sdata->playback_udp_stream, mono, bytes);
+        } else {
+            udp_stream_server_write(sdata->playback_udp_stream_server, mono, bytes);
+        }
+    } else {
+        if (sdata->playback_udp_stream != NULL) {
+            udp_stream_write(sdata->playback_udp_stream, mono, mono, bytes);
+        } else {
+            udp_stream_server_write(sdata->playback_udp_stream_server, mono, mono, bytes);
+        }
+    }
+}
+
+static void send_noise_batch(file_cmd_tcp_server_data* sdata, size_t sample_count) {
+    // Fill startup gap with low-level white noise until first decoded chunk is ready.
+    std::vector<float> noise(sample_count);
+    for (size_t i = 0; i < sample_count; ++i) {
+        sdata->playback_noise_state = sdata->playback_noise_state * 1664525u + 1013904223u;
+        float normalized = ((float)(sdata->playback_noise_state & 0xFFFFu) / 32767.5f) - 1.0f;
+        noise[i] = normalized * 0.02f;
+    }
+    send_playback_samples(sdata, noise.data(), sample_count);
 }
 
 static void pump_playback(file_cmd_tcp_server_data* sdata) {
@@ -404,6 +434,8 @@ static void pump_playback(file_cmd_tcp_server_data* sdata) {
                 stop_playback(sdata);
                 queue_response(sdata, "OK PLAYBACK FINISHED\n");
             }
+        } else if (sdata->playback_waiting_for_first_chunk) {
+            send_noise_batch(sdata, target_samples);
         }
         return;
     }
@@ -418,19 +450,8 @@ static void pump_playback(file_cmd_tcp_server_data* sdata) {
         mono[i] = (float)sample / 32768.0f;
     }
 
-    if (sdata->playback_mode == MM_MONO) {
-        if (sdata->playback_udp_stream != NULL) {
-            udp_stream_write(sdata->playback_udp_stream, mono.data(), send_samples * sizeof(float));
-        } else {
-            udp_stream_server_write(sdata->playback_udp_stream_server, mono.data(), send_samples * sizeof(float));
-        }
-    } else {
-        if (sdata->playback_udp_stream != NULL) {
-            udp_stream_write(sdata->playback_udp_stream, mono.data(), mono.data(), send_samples * sizeof(float));
-        } else {
-            udp_stream_server_write(sdata->playback_udp_stream_server, mono.data(), mono.data(), send_samples * sizeof(float));
-        }
-    }
+    sdata->playback_waiting_for_first_chunk = false;
+    send_playback_samples(sdata, mono.data(), send_samples);
 
     std::vector<unsigned char>::difference_type consumed = (std::vector<unsigned char>::difference_type)(send_samples * sizeof(int16_t));
     sdata->playback_pcm16_buffer.erase(sdata->playback_pcm16_buffer.begin(), sdata->playback_pcm16_buffer.begin() + consumed);
@@ -454,6 +475,7 @@ static void handle_command(file_cmd_tcp_server_data* sdata, std::string const& c
     if (line.empty()) {
         return;
     }
+    log(LOG_INFO, "file_cmd_tcp_server: command received on %s:%s: %s\n", sdata->bind_address, sdata->bind_port, line.c_str());
 
     size_t sep = line.find_first_of(" \t");
     std::string command = line.substr(0, sep);
@@ -630,6 +652,8 @@ bool file_cmd_tcp_server_init(file_cmd_tcp_server_data* sdata) {
     sdata->playback_decoder_eof = false;
     sdata->playback_file_path.clear();
     sdata->playback_pcm16_buffer.clear();
+    sdata->playback_waiting_for_first_chunk = false;
+    sdata->playback_noise_state = 0x12345678u;
 
     struct addrinfo hints;
     struct addrinfo* result;
