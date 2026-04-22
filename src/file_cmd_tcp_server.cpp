@@ -299,8 +299,8 @@ static bool start_decoder_process(file_cmd_tcp_server_data* sdata, std::string c
         char sample_rate[16];
         snprintf(sample_rate, sizeof(sample_rate), "%d", WAVE_RATE);
 
-        execl("/usr/bin/ffmpeg", "ffmpeg", "-v", "error", "-nostdin", "-i", file_path.c_str(), "-f", "s16le", "-ac", "1", "-ar", sample_rate, "pipe:1", (char*)NULL);
-        execlp("ffmpeg", "ffmpeg", "-v", "error", "-nostdin", "-i", file_path.c_str(), "-f", "s16le", "-ac", "1", "-ar", sample_rate, "pipe:1", (char*)NULL);
+        execl("/usr/bin/ffmpeg", "ffmpeg", "-v", "error", "-nostdin", "-i", file_path.c_str(), "-map", "0:a:0", "-vn", "-sn", "-dn", "-f", "s16le", "-ac", "1", "-ar", sample_rate, "pipe:1", (char*)NULL);
+        execlp("ffmpeg", "ffmpeg", "-v", "error", "-nostdin", "-i", file_path.c_str(), "-map", "0:a:0", "-vn", "-sn", "-dn", "-f", "s16le", "-ac", "1", "-ar", sample_rate, "pipe:1", (char*)NULL);
         _exit(127);
     }
 
