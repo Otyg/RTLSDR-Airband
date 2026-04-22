@@ -319,13 +319,17 @@ static bool start_decoder_process(file_cmd_tcp_server_data* sdata, std::string c
 }
 
 static bool start_playback(file_cmd_tcp_server_data* sdata, std::string const& file_path, std::string* error_message) {
-    if (sdata->playback_udp_stream == NULL) {
-        *error_message = "ERR no udp_stream output configured on this channel\n";
+    if (sdata->playback_udp_stream == NULL && sdata->playback_udp_stream_server == NULL) {
+        *error_message = "ERR no udp_stream or udp_stream_server output configured on this channel\n";
         return false;
     }
 
-    if (sdata->playback_udp_stream->send_socket == -1) {
+    if (sdata->playback_udp_stream != NULL && sdata->playback_udp_stream->send_socket == -1) {
         *error_message = "ERR udp_stream output is not connected\n";
+        return false;
+    }
+    if (sdata->playback_udp_stream_server != NULL && sdata->playback_udp_stream_server->socket_fd == -1) {
+        *error_message = "ERR udp_stream_server output is not available\n";
         return false;
     }
 
@@ -355,7 +359,7 @@ static bool start_playback(file_cmd_tcp_server_data* sdata, std::string const& f
 }
 
 static void pump_playback(file_cmd_tcp_server_data* sdata) {
-    if (!sdata->playback_active || sdata->playback_udp_stream == NULL) {
+    if (!sdata->playback_active || (sdata->playback_udp_stream == NULL && sdata->playback_udp_stream_server == NULL)) {
         return;
     }
 
@@ -415,9 +419,17 @@ static void pump_playback(file_cmd_tcp_server_data* sdata) {
     }
 
     if (sdata->playback_mode == MM_MONO) {
-        udp_stream_write(sdata->playback_udp_stream, mono.data(), send_samples * sizeof(float));
+        if (sdata->playback_udp_stream != NULL) {
+            udp_stream_write(sdata->playback_udp_stream, mono.data(), send_samples * sizeof(float));
+        } else {
+            udp_stream_server_write(sdata->playback_udp_stream_server, mono.data(), send_samples * sizeof(float));
+        }
     } else {
-        udp_stream_write(sdata->playback_udp_stream, mono.data(), mono.data(), send_samples * sizeof(float));
+        if (sdata->playback_udp_stream != NULL) {
+            udp_stream_write(sdata->playback_udp_stream, mono.data(), mono.data(), send_samples * sizeof(float));
+        } else {
+            udp_stream_server_write(sdata->playback_udp_stream_server, mono.data(), mono.data(), send_samples * sizeof(float));
+        }
     }
 
     std::vector<unsigned char>::difference_type consumed = (std::vector<unsigned char>::difference_type)(send_samples * sizeof(int16_t));
@@ -581,6 +593,7 @@ static void accept_client_if_available(file_cmd_tcp_server_data* sdata) {
 void file_cmd_tcp_server_set_dirs(file_cmd_tcp_server_data* sdata, channel_t const* channel) {
     sdata->directories.clear();
     sdata->playback_udp_stream = NULL;
+    sdata->playback_udp_stream_server = NULL;
     sdata->playback_mode = channel->mode;
 
     for (int i = 0; i < channel->output_count; ++i) {
@@ -594,6 +607,8 @@ void file_cmd_tcp_server_set_dirs(file_cmd_tcp_server_data* sdata, channel_t con
             sdata->directories.push_back(fdata->basedir);
         } else if (output->type == O_UDP_STREAM && sdata->playback_udp_stream == NULL) {
             sdata->playback_udp_stream = (udp_stream_data*)output->data;
+        } else if (output->type == O_UDP_STREAM_SERVER && sdata->playback_udp_stream_server == NULL) {
+            sdata->playback_udp_stream_server = (udp_stream_server_data*)output->data;
         }
     }
 

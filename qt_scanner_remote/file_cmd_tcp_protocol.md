@@ -60,7 +60,7 @@ OK LIST_FILES 2
 ```
 
 ### `PLAY_FILE <absolute-path>`
-Spelar en `.mp3` eller `.flac` en gång över kanalens befintliga `udp_stream`-destination.
+Spelar en `.mp3` eller `.flac` en gång över kanalens befintliga `udp_stream` eller `udp_stream_server`.
 
 Exempel svar vid start:
 
@@ -107,8 +107,9 @@ ERR missing file path
 ERR file not found
 ERR file outside configured recording directories
 ERR unsupported file extension (use .mp3 or .flac)
-ERR no udp_stream output configured on this channel
+ERR no udp_stream or udp_stream_server output configured on this channel
 ERR udp_stream output is not connected
+ERR udp_stream_server output is not available
 ERR failed to start decoder (ffmpeg required)
 ERR playback failed
 ERR playback loop restart failed
@@ -118,6 +119,7 @@ ERR playback loop restart failed
 - Under filuppspelning pausas live-audio till samma `udp_stream`-output.
 - `PLAY_FILE`/`LOOP_FILE` tillåter bara filer under kanalens inspelningskataloger.
 - Avkodning sker via `ffmpeg` i runtime-miljön.
+- För `udp_stream_server` krävs att en klient har registrerat sig på UDP-porten för att ta emot ljud.
 
 ## Snabbtest med netcat
 

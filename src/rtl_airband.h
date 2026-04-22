@@ -236,6 +236,7 @@ struct file_cmd_tcp_server_data {
     size_t send_offset;
 
     udp_stream_data* playback_udp_stream;
+    udp_stream_server_data* playback_udp_stream_server;
     mix_modes playback_mode;
     bool playback_active;
     bool playback_loop;
