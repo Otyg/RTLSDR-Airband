@@ -299,6 +299,7 @@ static bool start_decoder_process(file_cmd_tcp_server_data* sdata, std::string c
         char sample_rate[16];
         snprintf(sample_rate, sizeof(sample_rate), "%d", WAVE_RATE);
 
+        execl("/usr/bin/ffmpeg", "ffmpeg", "-v", "error", "-nostdin", "-i", file_path.c_str(), "-f", "s16le", "-ac", "1", "-ar", sample_rate, "pipe:1", (char*)NULL);
         execlp("ffmpeg", "ffmpeg", "-v", "error", "-nostdin", "-i", file_path.c_str(), "-f", "s16le", "-ac", "1", "-ar", sample_rate, "pipe:1", (char*)NULL);
         _exit(127);
     }
@@ -408,6 +409,18 @@ static void pump_playback(file_cmd_tcp_server_data* sdata) {
             close(sdata->playback_pipe_fd);
             sdata->playback_pipe_fd = -1;
             sdata->playback_decoder_eof = true;
+            if (sdata->playback_decoder_pid > 0) {
+                int status = 0;
+                pid_t ret = waitpid((pid_t)sdata->playback_decoder_pid, &status, WNOHANG);
+                if (ret == (pid_t)sdata->playback_decoder_pid) {
+                    if (WIFEXITED(status)) {
+                        log(LOG_INFO, "file_cmd_tcp_server: decoder exited with status %d for %s\n", WEXITSTATUS(status), sdata->playback_file_path.c_str());
+                    } else if (WIFSIGNALED(status)) {
+                        log(LOG_INFO, "file_cmd_tcp_server: decoder killed by signal %d for %s\n", WTERMSIG(status), sdata->playback_file_path.c_str());
+                    }
+                    sdata->playback_decoder_pid = -1;
+                }
+            }
             break;
         }
 
@@ -424,6 +437,12 @@ static void pump_playback(file_cmd_tcp_server_data* sdata) {
     size_t available_samples = sdata->playback_pcm16_buffer.size() / sizeof(int16_t);
     if (available_samples == 0) {
         if (sdata->playback_decoder_eof) {
+            if (sdata->playback_waiting_for_first_chunk) {
+                log(LOG_WARNING, "file_cmd_tcp_server: decoder produced no samples for %s\n", sdata->playback_file_path.c_str());
+                stop_playback(sdata);
+                queue_response(sdata, "ERR playback failed\n");
+                return;
+            }
             if (sdata->playback_loop && !sdata->playback_file_path.empty()) {
                 clear_decoder_process(sdata);
                 if (!start_decoder_process(sdata, sdata->playback_file_path)) {
