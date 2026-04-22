@@ -307,6 +307,12 @@ bool init_output(channel_t* channel, output_t* output) {
         if (!tcp_stream_server_init(sdata, channel->mode, (size_t)WAVE_BATCH * sizeof(float))) {
             return false;
         }
+    } else if (output->type == O_FILE_CMD_TCP_SERVER) {
+        file_cmd_tcp_server_data* sdata = (file_cmd_tcp_server_data*)(output->data);
+        file_cmd_tcp_server_set_dirs(sdata, channel);
+        if (!file_cmd_tcp_server_init(sdata)) {
+            return false;
+        }
 #ifdef WITH_PULSEAUDIO
     } else if (output->type == O_PULSE) {
         pulse_init();

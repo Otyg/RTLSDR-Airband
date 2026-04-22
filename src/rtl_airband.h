@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <libconfig.h++>
 #include <string>
+#include <vector>
 
 #include "config.h"
 #ifdef WITH_FLAC_FILE_OUTPUT
@@ -119,7 +120,8 @@ enum output_type {
     O_UDP_STREAM,
     O_UDP_STREAM_SERVER,
     O_SCAN_META_TCP_SERVER,
-    O_TCP_STREAM_SERVER
+    O_TCP_STREAM_SERVER,
+    O_FILE_CMD_TCP_SERVER
 #ifdef WITH_PULSEAUDIO
     ,
     O_PULSE
@@ -219,6 +221,29 @@ struct scan_meta_tcp_server_data {
 
     int listen_socket;
     int client_socket;
+};
+
+struct file_cmd_tcp_server_data {
+    const char* bind_address;
+    const char* bind_port;
+
+    int listen_socket;
+    int client_socket;
+
+    std::vector<std::string> directories;
+    std::string recv_buffer;
+    std::string send_buffer;
+    size_t send_offset;
+
+    udp_stream_data* playback_udp_stream;
+    mix_modes playback_mode;
+    bool playback_active;
+    bool playback_loop;
+    int playback_pipe_fd;
+    int playback_decoder_pid;
+    bool playback_decoder_eof;
+    std::string playback_file_path;
+    std::vector<unsigned char> playback_pcm16_buffer;
 };
 
 #ifdef WITH_PULSEAUDIO
@@ -481,6 +506,12 @@ void tcp_stream_server_shutdown(tcp_stream_server_data* sdata);
 bool scan_meta_tcp_server_init(scan_meta_tcp_server_data* sdata);
 void scan_meta_tcp_server_write(scan_meta_tcp_server_data* sdata, int device_idx, int freq_hz, char const* label, bool squelch_open);
 void scan_meta_tcp_server_shutdown(scan_meta_tcp_server_data* sdata);
+
+// file_cmd_tcp_server.cpp
+void file_cmd_tcp_server_set_dirs(file_cmd_tcp_server_data* sdata, channel_t const* channel);
+bool file_cmd_tcp_server_init(file_cmd_tcp_server_data* sdata);
+void file_cmd_tcp_server_poll(file_cmd_tcp_server_data* sdata);
+void file_cmd_tcp_server_shutdown(file_cmd_tcp_server_data* sdata);
 
 #ifdef WITH_PULSEAUDIO
 #define PULSE_STREAM_LATENCY_LIMIT 10000000UL

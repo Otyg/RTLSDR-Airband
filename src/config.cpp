@@ -364,6 +364,29 @@ static int parse_outputs(libconfig::Setting& outs, channel_t* channel, int i, in
                 cerr << "Configuration error: devices.[" << i << "] channels.[" << j << "] outputs.[" << o << "]: missing bind_port\n";
                 error();
             }
+        } else if (!strncmp(outs[o]["type"], "file_cmd_tcp_server", 19)) {
+            if (parsing_mixers) {
+                cerr << "Configuration error: mixers.[" << i << "] outputs.[" << o << "]: file_cmd_tcp_server output is not allowed for mixers\n";
+                error();
+            }
+            channel->outputs[oo].data = XCALLOC(1, sizeof(struct file_cmd_tcp_server_data));
+            channel->outputs[oo].type = O_FILE_CMD_TCP_SERVER;
+
+            file_cmd_tcp_server_data* sdata = (file_cmd_tcp_server_data*)channel->outputs[oo].data;
+            sdata->bind_address = outs[o].exists("bind_address") ? strdup(outs[o]["bind_address"]) : strdup("0.0.0.0");
+
+            if (outs[o].exists("bind_port")) {
+                if (outs[o]["bind_port"].getType() == libconfig::Setting::TypeInt) {
+                    char buffer[12];
+                    sprintf(buffer, "%d", (int)outs[o]["bind_port"]);
+                    sdata->bind_port = strdup(buffer);
+                } else {
+                    sdata->bind_port = strdup(outs[o]["bind_port"]);
+                }
+            } else {
+                cerr << "Configuration error: devices.[" << i << "] channels.[" << j << "] outputs.[" << o << "]: missing bind_port\n";
+                error();
+            }
         } else if (!strcmp(outs[o]["type"], "udp_stream")) {
             channel->outputs[oo].data = XCALLOC(1, sizeof(struct udp_stream_data));
             channel->outputs[oo].type = O_UDP_STREAM;

@@ -312,6 +312,7 @@ add_library (rtl_airband_base OBJECT
 	scan_meta_udp.cpp
 	tcp_stream_server.cpp
 	scan_meta_tcp_server.cpp
+	file_cmd_tcp_server.cpp
 	logging.cpp
 	filters.cpp
 	helper_functions.cpp

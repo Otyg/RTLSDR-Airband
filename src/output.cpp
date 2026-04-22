@@ -526,6 +526,20 @@ static bool output_file_ready(channel_t* channel, output_t* output) {
     return true;
 }
 
+static bool is_udp_stream_overridden_by_file_playback(channel_t* channel, udp_stream_data* udp_data) {
+    for (int i = 0; i < channel->output_count; ++i) {
+        output_t* output = channel->outputs + i;
+        if (output->type != O_FILE_CMD_TCP_SERVER) {
+            continue;
+        }
+        file_cmd_tcp_server_data* cdata = (file_cmd_tcp_server_data*)output->data;
+        if (cdata && cdata->playback_active && cdata->playback_udp_stream == udp_data) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Create all the output for a particular channel.
 void process_outputs(channel_t* channel, int cur_scan_freq) {
     for (int k = 0; k < channel->output_count; k++) {
@@ -657,6 +671,9 @@ void process_outputs(channel_t* channel, int cur_scan_freq) {
         } else if (channel->outputs[k].type == O_MIXER) {
             mixer_data* mdata = (mixer_data*)(channel->outputs[k].data);
             mixer_put_samples(mdata->mixer, mdata->input, channel->waveout, channel->axcindicate != NO_SIGNAL, WAVE_BATCH);
+        } else if (channel->outputs[k].type == O_FILE_CMD_TCP_SERVER) {
+            file_cmd_tcp_server_data* sdata = (file_cmd_tcp_server_data*)channel->outputs[k].data;
+            file_cmd_tcp_server_poll(sdata);
         } else if (channel->outputs[k].type == O_SCAN_META_UDP) {
             scan_meta_udp_data* sdata = (scan_meta_udp_data*)channel->outputs[k].data;
             int meta_freq_idx = -1;
@@ -672,6 +689,9 @@ void process_outputs(channel_t* channel, int cur_scan_freq) {
             }
         } else if (channel->outputs[k].type == O_UDP_STREAM) {
             udp_stream_data* sdata = (udp_stream_data*)channel->outputs[k].data;
+            if (is_udp_stream_overridden_by_file_playback(channel, sdata)) {
+                continue;
+            }
 
             if (sdata->continuous == false && channel->axcindicate == NO_SIGNAL) {
                 continue;
@@ -765,6 +785,9 @@ void disable_channel_outputs(channel_t* channel) {
         } else if (output->type == O_SCAN_META_TCP_SERVER) {
             scan_meta_tcp_server_data* sdata = (scan_meta_tcp_server_data*)output->data;
             scan_meta_tcp_server_shutdown(sdata);
+        } else if (output->type == O_FILE_CMD_TCP_SERVER) {
+            file_cmd_tcp_server_data* sdata = (file_cmd_tcp_server_data*)output->data;
+            file_cmd_tcp_server_shutdown(sdata);
         } else if (output->type == O_TCP_STREAM_SERVER) {
             tcp_stream_server_data* sdata = (tcp_stream_server_data*)output->data;
             tcp_stream_server_shutdown(sdata);
@@ -1183,6 +1206,15 @@ void* output_check_thread(void*) {
                             scan_meta_tcp_server_shutdown(sdata);
                         } else if (dev->input->state == INPUT_RUNNING && sdata->listen_socket == -1) {
                             scan_meta_tcp_server_init(sdata);
+                        }
+                    } else if (dev->channels[j].outputs[k].type == O_FILE_CMD_TCP_SERVER) {
+                        file_cmd_tcp_server_data* sdata = (file_cmd_tcp_server_data*)dev->channels[j].outputs[k].data;
+
+                        if (dev->input->state == INPUT_FAILED) {
+                            file_cmd_tcp_server_shutdown(sdata);
+                        } else if (dev->input->state == INPUT_RUNNING && sdata->listen_socket == -1) {
+                            file_cmd_tcp_server_set_dirs(sdata, dev->channels + j);
+                            file_cmd_tcp_server_init(sdata);
                         }
 #ifdef WITH_PULSEAUDIO
                     } else if (dev->channels[j].outputs[k].type == O_PULSE) {

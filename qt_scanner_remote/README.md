@@ -31,6 +31,9 @@ Default connection:
 ## Expected metadata payload
 See [`docs/scan_meta_protocol.md`](../docs/scan_meta_protocol.md).
 
+## File Command Protocol
+See [`file_cmd_tcp_protocol.md`](./file_cmd_tcp_protocol.md).
+
 ## WSL/WSLg Audio Notes
 If audio is silent in WSL but signal meters move in the GUI:
 
