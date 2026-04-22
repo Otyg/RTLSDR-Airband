@@ -18,7 +18,6 @@
 #include "MetadataReceiver.h"
 #include "Mp3FilePlayer.h"
 #include "SpectrumWidget.h"
-#include "WaterfallWidget.h"
 #include "WaveformWidget.h"
 
 QT_BEGIN_NAMESPACE
@@ -34,6 +33,7 @@ class QPlainTextEdit;
 class QGridLayout;
 class QGroupBox;
 class QTableWidget;
+class QWidget;
 QT_END_NAMESPACE
 
 class MainWindow : public QMainWindow {
@@ -54,7 +54,9 @@ class MainWindow : public QMainWindow {
     void onAudioChunk(QByteArray pcmData);
     void onMp3PlaybackStarted();
     void onMp3PlaybackFinished();
+    void openConfigEditorWindow();
     void browseConfigFile();
+    void importChannelListFile();
     void loadConfigFile();
     void saveConfigFile();
     void addConfigChannel();
@@ -83,8 +85,10 @@ class MainWindow : public QMainWindow {
     void refreshAudioOutputDevices();
     void applySelectedAudioOutput();
     bool loadChannelsFromConfig(QString const& path, QString* errorMessage = nullptr);
+    bool loadChannelsFromSemicolonFile(QString const& path, QString* errorMessage = nullptr);
     bool saveChannelsToConfig(QString const& path, QString* errorMessage = nullptr);
     bool parseConfigChannels(QString const& content, QList<ConfigChannelEntry>* entries, QString* errorMessage) const;
+    bool parseSemicolonChannels(QString const& content, QList<ConfigChannelEntry>* entries, QString* errorMessage) const;
     QString replaceConfigList(QString const& content, QString const& key, QString const& replacementBody) const;
     QString formatFrequencyList(QList<ConfigChannelEntry> const& entries) const;
     QString formatQuotedList(QList<ConfigChannelEntry> const& entries, QString ConfigChannelEntry::*field) const;
@@ -103,7 +107,6 @@ class MainWindow : public QMainWindow {
     QProgressBar* inputLevelBar_;
     WaveformWidget* inputWaveform_;
     SpectrumWidget* inputSpectrum_;
-    WaterfallWidget* inputWaterfall_;
     QComboBox* audioOutputDeviceSelect_;
     QDoubleSpinBox* noiseSuppressionInput_;
     QDoubleSpinBox* presenceBoostInput_;
@@ -118,10 +121,12 @@ class MainWindow : public QMainWindow {
     QPushButton* startButton_;
     QPushButton* loadMp3Button_;
     QPushButton* stopButton_;
+    QPushButton* openConfigEditorButton_;
+    QWidget* configEditorWindow_;
     QLineEdit* configFilePath_;
     QTableWidget* configChannelTable_;
     QPushButton* browseConfigButton_;
-    QPushButton* loadConfigButton_;
+    QPushButton* importConfigButton_;
     QPushButton* addChannelButton_;
     QPushButton* removeChannelButton_;
     QPushButton* saveConfigButton_;

@@ -10,20 +10,28 @@
 #include <QDoubleSpinBox>
 #include <QEvent>
 #include <QFileDialog>
+#include <QFile>
 #include <QFormLayout>
 #include <QFrame>
 #include <QFontMetrics>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QRegularExpressionMatch>
+#include <QSet>
 #include <QSpinBox>
 #include <QStatusBar>
+#include <QTableWidget>
+#include <QTableWidgetItem>
 #include <QTimer>
+#include <QTextStream>
 #include <QVariant>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -33,11 +41,21 @@
 
 namespace {
 constexpr int kMaxChannelWaterfallFrames = 4000;
+
+QComboBox* createModulationComboBox(QWidget* parent, QString const& value) {
+    QComboBox* combo = new QComboBox(parent);
+    combo->addItem("am");
+    combo->addItem("nfm");
+    int const index = combo->findText(value.trimmed().toLower());
+    combo->setCurrentIndex(index >= 0 ? index : 0);
+    return combo;
+}
 }
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), localFileMode_(false) {
     QWidget* central = new QWidget(this);
     QVBoxLayout* root = new QVBoxLayout(central);
+    configEditorWindow_ = nullptr;
 
     QGroupBox* networkGroup = new QGroupBox("Network", central);
     QGridLayout* networkLayout = new QGridLayout(networkGroup);
@@ -68,9 +86,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), localFileMode_(fa
     inputLevelBar_->setValue(0);
     inputWaveform_ = new WaveformWidget(audioGroup);
     inputSpectrum_ = new SpectrumWidget(audioGroup);
-    inputWaterfall_ = new WaterfallWidget(audioGroup);
-    inputWaterfall_->setMinimumHeight(70);
-    inputWaterfall_->setMaximumHeight(70);
+    inputWaveform_->setMinimumHeight(70);
+    inputWaveform_->setMaximumHeight(70);
     inputSpectrum_->setMinimumHeight(70);
     inputSpectrum_->setMaximumHeight(70);
     QHBoxLayout* scopeLayout = new QHBoxLayout();
@@ -80,7 +97,6 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), localFileMode_(fa
     spectrumLayout->setSpacing(8);
     spectrumLayout->setContentsMargins(0, 0, 0, 0);
     spectrumLayout->addWidget(inputSpectrum_);
-    spectrumLayout->addWidget(inputWaterfall_);
     scopeLayout->addLayout(spectrumLayout, 1);
     audioLayout->addRow("Level", inputLevelBar_);
     audioLayout->addRow("Signal", scopeLayout);
@@ -137,14 +153,54 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), localFileMode_(fa
     squelchLog_->setPlaceholderText("timestamp frequency label duration");
     logLayout->addWidget(squelchLog_);
 
+    configEditorWindow_ = new QWidget(this, Qt::Window);
+    configEditorWindow_->setWindowTitle("Scanner Config Editor");
+    configEditorWindow_->resize(760, 520);
+    QVBoxLayout* configWindowLayout = new QVBoxLayout(configEditorWindow_);
+
+    QGroupBox* configGroup = new QGroupBox("Scanner Config", configEditorWindow_);
+    QVBoxLayout* configLayout = new QVBoxLayout(configGroup);
+    QHBoxLayout* configPathLayout = new QHBoxLayout();
+    configFilePath_ = new QLineEdit(configGroup);
+    configFilePath_->setPlaceholderText("Select an rtl_airband .conf file");
+    browseConfigButton_ = new QPushButton("Browse", configGroup);
+    importConfigButton_ = new QPushButton("Import", configGroup);
+    saveConfigButton_ = new QPushButton("Save", configGroup);
+    configPathLayout->addWidget(configFilePath_, 1);
+    configPathLayout->addWidget(browseConfigButton_);
+    configPathLayout->addWidget(importConfigButton_);
+    configPathLayout->addWidget(saveConfigButton_);
+
+    configChannelTable_ = new QTableWidget(0, 3, configGroup);
+    configChannelTable_->setHorizontalHeaderLabels(QStringList() << "Frequency (MHz)" << "Modulation" << "Label");
+    configChannelTable_->horizontalHeader()->setStretchLastSection(true);
+    configChannelTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    configChannelTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    configChannelTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    configChannelTable_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+
+    QHBoxLayout* configButtonsLayout = new QHBoxLayout();
+    addChannelButton_ = new QPushButton("Add Channel", configGroup);
+    removeChannelButton_ = new QPushButton("Remove Selected", configGroup);
+    configButtonsLayout->addWidget(addChannelButton_);
+    configButtonsLayout->addWidget(removeChannelButton_);
+    configButtonsLayout->addStretch(1);
+
+    configLayout->addLayout(configPathLayout);
+    configLayout->addWidget(configChannelTable_);
+    configLayout->addLayout(configButtonsLayout);
+    configWindowLayout->addWidget(configGroup);
+
     QHBoxLayout* controls = new QHBoxLayout();
     startButton_ = new QPushButton("Start", central);
     loadMp3Button_ = new QPushButton("Load MP3", central);
     stopButton_ = new QPushButton("Stop", central);
+    openConfigEditorButton_ = new QPushButton("Edit Config", central);
     stopButton_->setEnabled(false);
     controls->addWidget(startButton_);
     controls->addWidget(loadMp3Button_);
     controls->addWidget(stopButton_);
+    controls->addWidget(openConfigEditorButton_);
 
     root->addWidget(networkGroup);
     root->addWidget(audioGroup);
@@ -160,6 +216,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), localFileMode_(fa
     connect(startButton_, &QPushButton::clicked, this, &MainWindow::startListening);
     connect(loadMp3Button_, &QPushButton::clicked, this, &MainWindow::loadMp3File);
     connect(stopButton_, &QPushButton::clicked, this, &MainWindow::stopListening);
+    connect(openConfigEditorButton_, &QPushButton::clicked, this, &MainWindow::openConfigEditorWindow);
+    connect(browseConfigButton_, &QPushButton::clicked, this, &MainWindow::browseConfigFile);
+    connect(importConfigButton_, &QPushButton::clicked, this, &MainWindow::importChannelListFile);
+    connect(saveConfigButton_, &QPushButton::clicked, this, &MainWindow::saveConfigFile);
+    connect(addChannelButton_, &QPushButton::clicked, this, &MainWindow::addConfigChannel);
+    connect(removeChannelButton_, &QPushButton::clicked, this, &MainWindow::removeSelectedConfigChannels);
     connect(audioOutputDeviceSelect_, &QComboBox::currentIndexChanged, this, [this](int) {
         applySelectedAudioOutput();
     });
@@ -363,6 +425,110 @@ void MainWindow::onMp3PlaybackFinished() {
     });
 }
 
+void MainWindow::openConfigEditorWindow() {
+    if (!configEditorWindow_) {
+        return;
+    }
+
+    configEditorWindow_->show();
+    configEditorWindow_->raise();
+    configEditorWindow_->activateWindow();
+}
+
+void MainWindow::browseConfigFile() {
+    QString const filePath = QFileDialog::getOpenFileName(
+        this, "Open rtl_airband Config", configFilePath_->text().trimmed(), "Config files (*.conf *.cfg *.txt);;All files (*)");
+    if (filePath.isEmpty()) {
+        return;
+    }
+
+    configFilePath_->setText(filePath);
+    loadConfigFile();
+}
+
+void MainWindow::importChannelListFile() {
+    QString const filePath = QFileDialog::getOpenFileName(
+        this,
+        "Import Channel List",
+        QString(),
+        "Channel lists (*.txt *.csv);;All files (*)");
+    if (filePath.isEmpty()) {
+        return;
+    }
+
+    QString errorMessage;
+    if (!loadChannelsFromSemicolonFile(filePath, &errorMessage)) {
+        QMessageBox::critical(this, "Import Channel List", errorMessage);
+        return;
+    }
+
+    statusBar()->showMessage(QString("Imported channels from %1").arg(filePath), 4000);
+}
+
+void MainWindow::loadConfigFile() {
+    QString const path = configFilePath_->text().trimmed();
+    if (path.isEmpty()) {
+        QMessageBox::warning(this, "Load Config", "Choose a config file first.");
+        return;
+    }
+
+    QString errorMessage;
+    if (!loadChannelsFromConfig(path, &errorMessage)) {
+        QMessageBox::critical(this, "Load Config", errorMessage);
+        return;
+    }
+
+    statusBar()->showMessage(QString("Loaded channels from %1").arg(path), 4000);
+}
+
+void MainWindow::saveConfigFile() {
+    QString path = configFilePath_->text().trimmed();
+    if (path.isEmpty()) {
+        path = QFileDialog::getSaveFileName(
+            this, "Save rtl_airband Config", QString(), "Config files (*.conf *.cfg *.txt);;All files (*)");
+        if (path.isEmpty()) {
+            return;
+        }
+        configFilePath_->setText(path);
+    }
+
+    QString errorMessage;
+    if (!saveChannelsToConfig(path, &errorMessage)) {
+        QMessageBox::critical(this, "Save Config", errorMessage);
+        return;
+    }
+
+    statusBar()->showMessage(QString("Saved channels to %1").arg(path), 4000);
+}
+
+void MainWindow::addConfigChannel() {
+    int const row = configChannelTable_->rowCount();
+    configChannelTable_->insertRow(row);
+    configChannelTable_->setItem(row, 0, new QTableWidgetItem("118.150"));
+    configChannelTable_->setCellWidget(row, 1, createModulationComboBox(configChannelTable_, "am"));
+    configChannelTable_->setItem(row, 2, new QTableWidgetItem(QString("Channel %1").arg(row + 1)));
+    configChannelTable_->setCurrentCell(row, 0);
+}
+
+void MainWindow::removeSelectedConfigChannels() {
+    QModelIndexList const selectedRows = configChannelTable_->selectionModel()
+                                             ? configChannelTable_->selectionModel()->selectedRows()
+                                             : QModelIndexList();
+    if (selectedRows.isEmpty()) {
+        return;
+    }
+
+    QList<int> rows;
+    rows.reserve(selectedRows.size());
+    for (QModelIndex const& index : selectedRows) {
+        rows.append(index.row());
+    }
+    std::sort(rows.begin(), rows.end(), std::greater<int>());
+    for (int row : rows) {
+        configChannelTable_->removeRow(row);
+    }
+}
+
 void MainWindow::onAudioChunk(QByteArray pcmData) {
     if (pcmData.isEmpty() || pcmData.size() % static_cast<int>(sizeof(int16_t)) != 0) {
         return;
@@ -388,7 +554,6 @@ void MainWindow::onAudioChunk(QByteArray pcmData) {
     QVector<float> const waterfallBins = computeWaterfallBins(floatData);
     inputWaveform_->setSamples(downsampleForWaveform(floatData));
     inputSpectrum_->setBins(waterfallBins);
-    inputWaterfall_->appendFrame(waterfallBins);
 
     if (squelchOpen_ && squelchFreqHz_ != 0) {
         appendChannelWaterfallFrame(squelchFreqHz_, waterfallBins);
@@ -708,6 +873,360 @@ void MainWindow::showChannelWaterfallDialog(qint64 freqHz) {
     dialog->show();
     dialog->raise();
     dialog->activateWindow();
+}
+
+bool MainWindow::loadChannelsFromConfig(QString const& path, QString* errorMessage) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        if (errorMessage) {
+            *errorMessage = QString("Unable to open %1: %2").arg(path).arg(file.errorString());
+        }
+        return false;
+    }
+
+    QTextStream stream(&file);
+    QString const content = stream.readAll();
+    QList<ConfigChannelEntry> entries;
+    if (!parseConfigChannels(content, &entries, errorMessage)) {
+        return false;
+    }
+
+    populateConfigTable(entries);
+    return true;
+}
+
+bool MainWindow::loadChannelsFromSemicolonFile(QString const& path, QString* errorMessage) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        if (errorMessage) {
+            *errorMessage = QString("Unable to open %1: %2").arg(path).arg(file.errorString());
+        }
+        return false;
+    }
+
+    QTextStream stream(&file);
+    QString const content = stream.readAll();
+    QList<ConfigChannelEntry> entries;
+    if (!parseSemicolonChannels(content, &entries, errorMessage)) {
+        return false;
+    }
+
+    auto normalizeFrequency = [](QString const& frequency) {
+        bool ok = false;
+        double const value = frequency.trimmed().toDouble(&ok);
+        return ok ? QString::number(value, 'g', 12) : frequency.trimmed();
+    };
+
+    QList<ConfigChannelEntry> mergedEntries = configChannelsFromTable();
+    QSet<QString> existingFrequencies;
+    for (ConfigChannelEntry const& entry : mergedEntries) {
+        existingFrequencies.insert(normalizeFrequency(entry.frequency));
+    }
+
+    for (ConfigChannelEntry const& entry : entries) {
+        QString const normalizedFrequency = normalizeFrequency(entry.frequency);
+        if (existingFrequencies.contains(normalizedFrequency)) {
+            continue;
+        }
+        mergedEntries.append(entry);
+        existingFrequencies.insert(normalizedFrequency);
+    }
+
+    populateConfigTable(mergedEntries);
+    return true;
+}
+
+bool MainWindow::saveChannelsToConfig(QString const& path, QString* errorMessage) {
+    QList<ConfigChannelEntry> const entries = configChannelsFromTable();
+    if (entries.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = "Add at least one channel before saving.";
+        }
+        return false;
+    }
+
+    QString content;
+    QFile inputFile(path);
+    if (inputFile.exists()) {
+        if (!inputFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            if (errorMessage) {
+                *errorMessage = QString("Unable to read %1: %2").arg(path).arg(inputFile.errorString());
+            }
+            return false;
+        }
+        QTextStream inputStream(&inputFile);
+        content = inputStream.readAll();
+        inputFile.close();
+    } else {
+        content = "devices:\n({\n  channels:\n  (\n    {\n    }\n  );\n});\n";
+    }
+
+    content = replaceConfigList(content, "freqs", formatFrequencyList(entries));
+    content = replaceConfigList(content, "modulation", formatQuotedList(entries, &ConfigChannelEntry::modulation));
+    content = replaceConfigList(content, "labels", formatQuotedList(entries, &ConfigChannelEntry::label));
+
+    QFile outputFile(path);
+    if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        if (errorMessage) {
+            *errorMessage = QString("Unable to write %1: %2").arg(path).arg(outputFile.errorString());
+        }
+        return false;
+    }
+
+    QTextStream outputStream(&outputFile);
+    outputStream << content;
+    return true;
+}
+
+bool MainWindow::parseConfigChannels(QString const& content,
+                                     QList<ConfigChannelEntry>* entries,
+                                     QString* errorMessage) const {
+    if (!entries) {
+        if (errorMessage) {
+            *errorMessage = "Internal error: no config output container provided.";
+        }
+        return false;
+    }
+
+    auto findListBody = [&](QString const& key) -> QString {
+        QRegularExpression const regex(
+            QString("%1\\s*=\\s*\\((.*?)\\)\\s*;").arg(QRegularExpression::escape(key)),
+            QRegularExpression::DotMatchesEverythingOption | QRegularExpression::CaseInsensitiveOption);
+        QRegularExpressionMatch const match = regex.match(content);
+        return match.hasMatch() ? match.captured(1) : QString();
+    };
+
+    QString const freqsBody = findListBody("freqs");
+    if (freqsBody.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = "Could not find a `freqs = ( ... );` list in the config.";
+        }
+        return false;
+    }
+
+    auto splitBareList = [](QString const& body) {
+        QString cleaned = body;
+        cleaned.replace('\n', ' ');
+        cleaned.replace('\r', ' ');
+        QStringList parts = cleaned.split(',', Qt::SkipEmptyParts);
+        for (QString& part : parts) {
+            part = part.trimmed();
+        }
+        return parts;
+    };
+
+    auto splitQuotedList = [](QString const& body) {
+        QStringList parts;
+        QRegularExpression const regex("\"((?:[^\"\\\\]|\\\\.)*)\"");
+        QRegularExpressionMatchIterator it = regex.globalMatch(body);
+        while (it.hasNext()) {
+            QRegularExpressionMatch const match = it.next();
+            QString value = match.captured(1);
+            value.replace("\\\"", "\"");
+            value.replace("\\\\", "\\");
+            parts.append(value);
+        }
+        return parts;
+    };
+
+    QStringList const freqs = splitBareList(freqsBody);
+    QStringList modulations = splitQuotedList(findListBody("modulation"));
+    QStringList labels = splitQuotedList(findListBody("labels"));
+
+    if (freqs.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = "The config file contains an empty frequency list.";
+        }
+        return false;
+    }
+
+    if (modulations.size() < freqs.size()) {
+        modulations.reserve(freqs.size());
+        while (modulations.size() < freqs.size()) {
+            modulations.append("am");
+        }
+    }
+    if (labels.size() < freqs.size()) {
+        labels.reserve(freqs.size());
+        while (labels.size() < freqs.size()) {
+            labels.append(QString());
+        }
+    }
+
+    entries->clear();
+    entries->reserve(freqs.size());
+    for (int i = 0; i < freqs.size(); ++i) {
+        ConfigChannelEntry entry;
+        entry.frequency = freqs[i];
+        entry.modulation = modulations.value(i, "am");
+        entry.label = labels.value(i);
+        entries->append(entry);
+    }
+
+    return true;
+}
+
+bool MainWindow::parseSemicolonChannels(QString const& content,
+                                        QList<ConfigChannelEntry>* entries,
+                                        QString* errorMessage) const {
+    if (!entries) {
+        if (errorMessage) {
+            *errorMessage = "Internal error: no channel output container provided.";
+        }
+        return false;
+    }
+
+    QList<ConfigChannelEntry> parsedEntries;
+    QStringList const lines = content.split(QRegularExpression("\\r?\\n"));
+    for (int i = 0; i < lines.size(); ++i) {
+        QString const trimmedLine = lines[i].trimmed();
+        if (trimmedLine.isEmpty() || trimmedLine.startsWith('#')) {
+            continue;
+        }
+
+        QStringList const parts = trimmedLine.split(';');
+        if (parts.size() < 3) {
+            if (errorMessage) {
+                *errorMessage = QString("Line %1 must use the format <MHz>;<modulation>;<name>.").arg(i + 1);
+            }
+            return false;
+        }
+
+        QString const frequency = parts[0].trimmed();
+        QString const modulation = parts[1].trimmed().toLower();
+        QString const label = parts.mid(2).join(";").trimmed();
+
+        bool frequencyOk = false;
+        frequency.toDouble(&frequencyOk);
+        if (!frequencyOk) {
+            if (errorMessage) {
+                *errorMessage = QString("Line %1 has an invalid MHz value: %2").arg(i + 1).arg(frequency);
+            }
+            return false;
+        }
+
+        if (modulation != "am" && modulation != "nfm") {
+            if (errorMessage) {
+                *errorMessage = QString("Line %1 has an unsupported modulation: %2").arg(i + 1).arg(modulation);
+            }
+            return false;
+        }
+
+        if (label.isEmpty()) {
+            if (errorMessage) {
+                *errorMessage = QString("Line %1 is missing a channel name.").arg(i + 1);
+            }
+            return false;
+        }
+
+        ConfigChannelEntry entry;
+        entry.frequency = frequency;
+        entry.modulation = modulation;
+        entry.label = label;
+        parsedEntries.append(entry);
+    }
+
+    if (parsedEntries.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = "The selected file does not contain any importable channel rows.";
+        }
+        return false;
+    }
+
+    *entries = parsedEntries;
+    return true;
+}
+
+QString MainWindow::replaceConfigList(QString const& content, QString const& key, QString const& replacementBody) const {
+    QRegularExpression const regex(
+        QString("(%1\\s*=\\s*\\()(.*?)(\\)\\s*;)").arg(QRegularExpression::escape(key)),
+        QRegularExpression::DotMatchesEverythingOption | QRegularExpression::CaseInsensitiveOption);
+    QRegularExpressionMatch const match = regex.match(content);
+    if (match.hasMatch()) {
+        QString updated = content;
+        updated.replace(match.capturedStart(2), match.capturedLength(2), replacementBody);
+        return updated;
+    }
+
+    QRegularExpression const channelBlockRegex("(channels\\s*:\\s*\\(\\s*\\{\\s*)",
+                                               QRegularExpression::DotMatchesEverythingOption |
+                                                   QRegularExpression::CaseInsensitiveOption);
+    QRegularExpressionMatch const channelBlockMatch = channelBlockRegex.match(content);
+    if (channelBlockMatch.hasMatch()) {
+        QString insertion = QString("%1 = (%2);\n      ").arg(key, replacementBody);
+        QString updated = content;
+        updated.insert(channelBlockMatch.capturedEnd(1), insertion);
+        return updated;
+    }
+
+    QString appended = content;
+    if (!appended.endsWith('\n')) {
+        appended += '\n';
+    }
+    appended += QString("%1 = (%2);\n").arg(key, replacementBody);
+    return appended;
+}
+
+QString MainWindow::formatFrequencyList(QList<ConfigChannelEntry> const& entries) const {
+    QStringList parts;
+    parts.reserve(entries.size());
+    for (ConfigChannelEntry const& entry : entries) {
+        parts.append(entry.frequency.trimmed());
+    }
+    return QString(" %1 ").arg(parts.join(", "));
+}
+
+QString MainWindow::formatQuotedList(QList<ConfigChannelEntry> const& entries,
+                                     QString ConfigChannelEntry::*field) const {
+    QStringList parts;
+    parts.reserve(entries.size());
+    for (ConfigChannelEntry const& entry : entries) {
+        QString value = entry.*field;
+        value.replace("\\", "\\\\");
+        value.replace("\"", "\\\"");
+        parts.append(QString("\"%1\"").arg(value));
+    }
+    return QString(" %1 ").arg(parts.join(", "));
+}
+
+QList<MainWindow::ConfigChannelEntry> MainWindow::configChannelsFromTable() const {
+    QList<ConfigChannelEntry> entries;
+    for (int row = 0; row < configChannelTable_->rowCount(); ++row) {
+        auto textAt = [&](int column) {
+            QTableWidgetItem const* item = configChannelTable_->item(row, column);
+            return item ? item->text().trimmed() : QString();
+        };
+        auto modulationAt = [&]() {
+            if (QComboBox* combo = qobject_cast<QComboBox*>(configChannelTable_->cellWidget(row, 1))) {
+                return combo->currentText().trimmed();
+            }
+            return textAt(1);
+        };
+
+        QString const frequency = textAt(0);
+        if (frequency.isEmpty()) {
+            continue;
+        }
+
+        ConfigChannelEntry entry;
+        entry.frequency = frequency;
+        QString const modulation = modulationAt();
+        entry.modulation = modulation.isEmpty() ? "am" : modulation;
+        entry.label = textAt(2);
+        entries.append(entry);
+    }
+    return entries;
+}
+
+void MainWindow::populateConfigTable(QList<ConfigChannelEntry> const& entries) {
+    configChannelTable_->setRowCount(0);
+    for (ConfigChannelEntry const& entry : entries) {
+        int const row = configChannelTable_->rowCount();
+        configChannelTable_->insertRow(row);
+        configChannelTable_->setItem(row, 0, new QTableWidgetItem(entry.frequency));
+        configChannelTable_->setCellWidget(row, 1, createModulationComboBox(configChannelTable_, entry.modulation));
+        configChannelTable_->setItem(row, 2, new QTableWidgetItem(entry.label));
+    }
 }
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
