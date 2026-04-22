@@ -244,6 +244,10 @@ static void clear_decoder_process(file_cmd_tcp_server_data* sdata) {
         close(sdata->playback_pipe_fd);
         sdata->playback_pipe_fd = -1;
     }
+    if (sdata->playback_stderr_fd != -1) {
+        close(sdata->playback_stderr_fd);
+        sdata->playback_stderr_fd = -1;
+    }
 
     if (sdata->playback_decoder_pid > 0) {
         int status = 0;
@@ -257,6 +261,7 @@ static void clear_decoder_process(file_cmd_tcp_server_data* sdata) {
     sdata->playback_decoder_pid = -1;
     sdata->playback_decoder_eof = false;
     sdata->playback_pcm16_buffer.clear();
+    sdata->playback_decoder_stderr.clear();
 }
 
 static void stop_playback(file_cmd_tcp_server_data* sdata) {
@@ -269,8 +274,15 @@ static void stop_playback(file_cmd_tcp_server_data* sdata) {
 
 static bool start_decoder_process(file_cmd_tcp_server_data* sdata, std::string const& file_path) {
     int pipefd[2] = {-1, -1};
+    int errpipe[2] = {-1, -1};
     if (pipe(pipefd) != 0) {
         log(LOG_WARNING, "file_cmd_tcp_server: pipe() failed: %s\n", strerror(errno));
+        return false;
+    }
+    if (pipe(errpipe) != 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        log(LOG_WARNING, "file_cmd_tcp_server: stderr pipe() failed: %s\n", strerror(errno));
         return false;
     }
 
@@ -278,23 +290,24 @@ static bool start_decoder_process(file_cmd_tcp_server_data* sdata, std::string c
     if (pid < 0) {
         close(pipefd[0]);
         close(pipefd[1]);
+        close(errpipe[0]);
+        close(errpipe[1]);
         log(LOG_WARNING, "file_cmd_tcp_server: fork() failed: %s\n", strerror(errno));
         return false;
     }
 
     if (pid == 0) {
         close(pipefd[0]);
+        close(errpipe[0]);
 
         if (dup2(pipefd[1], STDOUT_FILENO) == -1) {
             _exit(127);
         }
-
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull != -1) {
-            dup2(devnull, STDERR_FILENO);
-            close(devnull);
+        if (dup2(errpipe[1], STDERR_FILENO) == -1) {
+            _exit(127);
         }
         close(pipefd[1]);
+        close(errpipe[1]);
 
         char sample_rate[16];
         snprintf(sample_rate, sizeof(sample_rate), "%d", WAVE_RATE);
@@ -305,17 +318,28 @@ static bool start_decoder_process(file_cmd_tcp_server_data* sdata, std::string c
     }
 
     close(pipefd[1]);
+    close(errpipe[1]);
     if (!set_nonblocking(pipefd[0])) {
         close(pipefd[0]);
+        close(errpipe[0]);
+        kill(pid, SIGTERM);
+        waitpid(pid, NULL, 0);
+        return false;
+    }
+    if (!set_nonblocking(errpipe[0])) {
+        close(pipefd[0]);
+        close(errpipe[0]);
         kill(pid, SIGTERM);
         waitpid(pid, NULL, 0);
         return false;
     }
 
     sdata->playback_pipe_fd = pipefd[0];
+    sdata->playback_stderr_fd = errpipe[0];
     sdata->playback_decoder_pid = (int)pid;
     sdata->playback_decoder_eof = false;
     sdata->playback_pcm16_buffer.clear();
+    sdata->playback_decoder_stderr.clear();
     sdata->playback_active = true;
     return true;
 }
@@ -389,6 +413,34 @@ static void send_noise_batch(file_cmd_tcp_server_data* sdata, size_t sample_coun
     send_playback_samples(sdata, noise.data(), sample_count);
 }
 
+static void read_decoder_stderr(file_cmd_tcp_server_data* sdata) {
+    if (sdata->playback_stderr_fd == -1) {
+        return;
+    }
+    for (;;) {
+        char buf[512];
+        ssize_t n = read(sdata->playback_stderr_fd, buf, sizeof(buf));
+        if (n > 0) {
+            sdata->playback_decoder_stderr.append(buf, (size_t)n);
+            if (sdata->playback_decoder_stderr.size() > 4096) {
+                sdata->playback_decoder_stderr.erase(0, sdata->playback_decoder_stderr.size() - 4096);
+            }
+            continue;
+        }
+        if (n == 0) {
+            close(sdata->playback_stderr_fd);
+            sdata->playback_stderr_fd = -1;
+            return;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return;
+        }
+        close(sdata->playback_stderr_fd);
+        sdata->playback_stderr_fd = -1;
+        return;
+    }
+}
+
 static void pump_playback(file_cmd_tcp_server_data* sdata) {
     if (!sdata->playback_active || (sdata->playback_udp_stream == NULL && sdata->playback_udp_stream_server == NULL)) {
         return;
@@ -396,6 +448,7 @@ static void pump_playback(file_cmd_tcp_server_data* sdata) {
 
     size_t const target_samples = (size_t)WAVE_BATCH;
     size_t const target_bytes = target_samples * sizeof(int16_t);
+    read_decoder_stderr(sdata);
 
     while (sdata->playback_pcm16_buffer.size() < target_bytes && !sdata->playback_decoder_eof && sdata->playback_pipe_fd != -1) {
         unsigned char tmp[4096];
@@ -413,6 +466,7 @@ static void pump_playback(file_cmd_tcp_server_data* sdata) {
                 int status = 0;
                 pid_t ret = waitpid((pid_t)sdata->playback_decoder_pid, &status, WNOHANG);
                 if (ret == (pid_t)sdata->playback_decoder_pid) {
+                    read_decoder_stderr(sdata);
                     if (WIFEXITED(status)) {
                         log(LOG_INFO, "file_cmd_tcp_server: decoder exited with status %d for %s\n", WEXITSTATUS(status), sdata->playback_file_path.c_str());
                     } else if (WIFSIGNALED(status)) {
@@ -439,6 +493,9 @@ static void pump_playback(file_cmd_tcp_server_data* sdata) {
         if (sdata->playback_decoder_eof) {
             if (sdata->playback_waiting_for_first_chunk) {
                 log(LOG_WARNING, "file_cmd_tcp_server: decoder produced no samples for %s\n", sdata->playback_file_path.c_str());
+                if (!sdata->playback_decoder_stderr.empty()) {
+                    log(LOG_WARNING, "file_cmd_tcp_server: decoder stderr: %s\n", sdata->playback_decoder_stderr.c_str());
+                }
                 stop_playback(sdata);
                 queue_response(sdata, "ERR playback failed\n");
                 return;
@@ -667,10 +724,12 @@ bool file_cmd_tcp_server_init(file_cmd_tcp_server_data* sdata) {
     sdata->playback_active = false;
     sdata->playback_loop = false;
     sdata->playback_pipe_fd = -1;
+    sdata->playback_stderr_fd = -1;
     sdata->playback_decoder_pid = -1;
     sdata->playback_decoder_eof = false;
     sdata->playback_file_path.clear();
     sdata->playback_pcm16_buffer.clear();
+    sdata->playback_decoder_stderr.clear();
     sdata->playback_waiting_for_first_chunk = false;
     sdata->playback_noise_state = 0x12345678u;
 

@@ -241,10 +241,12 @@ struct file_cmd_tcp_server_data {
     bool playback_active;
     bool playback_loop;
     int playback_pipe_fd;
+    int playback_stderr_fd;
     int playback_decoder_pid;
     bool playback_decoder_eof;
     std::string playback_file_path;
     std::vector<unsigned char> playback_pcm16_buffer;
+    std::string playback_decoder_stderr;
     bool playback_waiting_for_first_chunk;
     uint32_t playback_noise_state;
 };
