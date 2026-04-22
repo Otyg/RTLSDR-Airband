@@ -7,6 +7,7 @@
 #include <QList>
 #include <QMainWindow>
 #include <QPointer>
+#include <QRegularExpression>
 #include <QResizeEvent>
 #include <QStringList>
 #include <QVector>
@@ -32,6 +33,7 @@ class QProgressBar;
 class QPlainTextEdit;
 class QGridLayout;
 class QGroupBox;
+class QTableWidget;
 QT_END_NAMESPACE
 
 class MainWindow : public QMainWindow {
@@ -52,8 +54,19 @@ class MainWindow : public QMainWindow {
     void onAudioChunk(QByteArray pcmData);
     void onMp3PlaybackStarted();
     void onMp3PlaybackFinished();
+    void browseConfigFile();
+    void loadConfigFile();
+    void saveConfigFile();
+    void addConfigChannel();
+    void removeSelectedConfigChannels();
 
    private:
+    struct ConfigChannelEntry {
+        QString frequency;
+        QString modulation;
+        QString label;
+    };
+
     void setStatus(QString status);
     void rebuildChannelGrid(QList<qint64> const& freqsHz, QStringList const& labels);
     void clearChannelGrid();
@@ -69,6 +82,14 @@ class MainWindow : public QMainWindow {
     void showChannelWaterfallDialog(qint64 freqHz);
     void refreshAudioOutputDevices();
     void applySelectedAudioOutput();
+    bool loadChannelsFromConfig(QString const& path, QString* errorMessage = nullptr);
+    bool saveChannelsToConfig(QString const& path, QString* errorMessage = nullptr);
+    bool parseConfigChannels(QString const& content, QList<ConfigChannelEntry>* entries, QString* errorMessage) const;
+    QString replaceConfigList(QString const& content, QString const& key, QString const& replacementBody) const;
+    QString formatFrequencyList(QList<ConfigChannelEntry> const& entries) const;
+    QString formatQuotedList(QList<ConfigChannelEntry> const& entries, QString ConfigChannelEntry::*field) const;
+    QList<ConfigChannelEntry> configChannelsFromTable() const;
+    void populateConfigTable(QList<ConfigChannelEntry> const& entries);
 
     AudioReceiver audioReceiver_;
     MetadataReceiver metadataReceiver_;
@@ -97,6 +118,13 @@ class MainWindow : public QMainWindow {
     QPushButton* startButton_;
     QPushButton* loadMp3Button_;
     QPushButton* stopButton_;
+    QLineEdit* configFilePath_;
+    QTableWidget* configChannelTable_;
+    QPushButton* browseConfigButton_;
+    QPushButton* loadConfigButton_;
+    QPushButton* addChannelButton_;
+    QPushButton* removeChannelButton_;
+    QPushButton* saveConfigButton_;
     QList<qint64> channelFreqs_;
     QStringList channelLabels_;
     QHash<qint64, QString> channelLabelByFreq_;

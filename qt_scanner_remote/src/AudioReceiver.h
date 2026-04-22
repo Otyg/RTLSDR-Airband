@@ -4,7 +4,7 @@
 #include <QByteArray>
 #include <QObject>
 #include <QString>
-#include <QTcpSocket>
+#include <QUdpSocket>
 
 class AudioReceiver : public QObject {
     Q_OBJECT
@@ -23,7 +23,7 @@ class AudioReceiver : public QObject {
     void onSocketError(QAbstractSocket::SocketError socketError);
 
    private:
-    QTcpSocket socket_;
+    QUdpSocket socket_;
     QByteArray pending_;
 };
 

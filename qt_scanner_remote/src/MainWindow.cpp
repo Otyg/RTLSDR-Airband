@@ -52,7 +52,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), localFileMode_(fa
     metadataPort_->setRange(1, 65535);
     metadataPort_->setValue(9001);
     networkLayout->addWidget(new QLabel("Backend host", networkGroup), 0, 0);
-    networkLayout->addWidget(new QLabel("Audio TCP port", networkGroup), 0, 1);
+    networkLayout->addWidget(new QLabel("Audio UDP port", networkGroup), 0, 1);
     networkLayout->addWidget(new QLabel("Metadata TCP port", networkGroup), 0, 2);
     networkLayout->addWidget(backendHost_, 1, 0);
     networkLayout->addWidget(audioPort_, 1, 1);
