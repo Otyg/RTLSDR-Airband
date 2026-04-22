@@ -369,7 +369,7 @@ static int parse_outputs(libconfig::Setting& outs, channel_t* channel, int i, in
                 cerr << "Configuration error: mixers.[" << i << "] outputs.[" << o << "]: file_cmd_tcp_server output is not allowed for mixers\n";
                 error();
             }
-            channel->outputs[oo].data = XCALLOC(1, sizeof(struct file_cmd_tcp_server_data));
+            channel->outputs[oo].data = new file_cmd_tcp_server_data{};
             channel->outputs[oo].type = O_FILE_CMD_TCP_SERVER;
 
             file_cmd_tcp_server_data* sdata = (file_cmd_tcp_server_data*)channel->outputs[oo].data;
