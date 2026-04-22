@@ -150,7 +150,7 @@ static int parse_outputs(libconfig::Setting& outs, channel_t* channel, int i, in
 #endif /* LIBSHOUT_HAS_TLS */
 
             channel->outputs[oo].has_mp3_output = true;
-        } else if (!strncmp(outs[o]["type"], "file", 4)) {
+        } else if (!strcmp(outs[o]["type"], "file")) {
             channel->outputs[oo].data = XCALLOC(1, sizeof(struct file_data));
             channel->outputs[oo].type = O_FILE;
             file_data* fdata = (file_data*)(channel->outputs[oo].data);
