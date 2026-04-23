@@ -206,6 +206,10 @@ void AudioEngine::pushFloat32Mono(QByteArray data) {
 
     emit pcmChunk(pcm);
     if (!playbackActive_) {
+        // Replay audio can arrive without matching metadata squelch-open events.
+        // In that case, play received audio instead of hard-muting it.
+        appendPendingPcm(pcm);
+        flushPendingPcm();
         return;
     }
 
