@@ -382,10 +382,18 @@ static bool start_playback(file_cmd_tcp_server_data* sdata, std::string const& f
 
     sdata->playback_file_path = file_path;
     sdata->playback_waiting_for_first_chunk = true;
+    if (sdata->playback_udp_stream_server != NULL) {
+        log(LOG_INFO, "file_cmd_tcp_server: playback target is udp_stream_server %s:%s\n", sdata->playback_udp_stream_server->bind_address, sdata->playback_udp_stream_server->bind_port);
+    } else if (sdata->playback_udp_stream != NULL) {
+        log(LOG_INFO, "file_cmd_tcp_server: playback target is udp_stream %s:%s\n", sdata->playback_udp_stream->dest_address, sdata->playback_udp_stream->dest_port);
+    }
     return true;
 }
 
 static void send_playback_samples(file_cmd_tcp_server_data* sdata, float const* mono, size_t sample_count) {
+    if (sdata->playback_waiting_for_first_chunk) {
+        log(LOG_INFO, "file_cmd_tcp_server: first decoded audio chunk ready (%zu samples)\n", sample_count);
+    }
     size_t const bytes = sample_count * sizeof(float);
     if (sdata->playback_mode == MM_MONO) {
         if (sdata->playback_udp_stream != NULL) {
@@ -492,9 +500,9 @@ static void pump_playback(file_cmd_tcp_server_data* sdata) {
     if (available_samples == 0) {
         if (sdata->playback_decoder_eof) {
             if (sdata->playback_waiting_for_first_chunk) {
-                log(LOG_WARNING, "file_cmd_tcp_server: decoder produced no samples for %s\n", sdata->playback_file_path.c_str());
+                log(LOG_INFO, "file_cmd_tcp_server: decoder produced no samples for %s\n", sdata->playback_file_path.c_str());
                 if (!sdata->playback_decoder_stderr.empty()) {
-                    log(LOG_WARNING, "file_cmd_tcp_server: decoder stderr: %s\n", sdata->playback_decoder_stderr.c_str());
+                    log(LOG_INFO, "file_cmd_tcp_server: decoder stderr: %s\n", sdata->playback_decoder_stderr.c_str());
                 }
                 stop_playback(sdata);
                 queue_response(sdata, "ERR playback failed\n");
