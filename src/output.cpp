@@ -345,9 +345,7 @@ static void try_decode_ais_frame(freq_t* fparms, std::vector<DecodedMessage>* ou
     int const payload_len = byte_count - 2;
     uint16_t const rx_fcs = (uint16_t)bytes[payload_len] | ((uint16_t)bytes[payload_len + 1] << 8);
     uint16_t const calc_fcs = crc16_x25(bytes, (size_t)payload_len);
-    if (rx_fcs != calc_fcs) {
-        return;
-    }
+    bool const crc_ok = (rx_fcs == calc_fcs);
 
     if (payload_len < 5) {
         return;
@@ -363,7 +361,7 @@ static void try_decode_ais_frame(freq_t* fparms, std::vector<DecodedMessage>* ou
     msg.modulation = "ais";
     msg.msg_type = "ais_frame";
     msg.payload = ais_decoded_payload_json(bytes, payload_len, ais_type, mmsi);
-    msg.crc_ok = true;
+    msg.crc_ok = crc_ok;
     msg.mmsi = mmsi;
     out->push_back(msg);
 }
