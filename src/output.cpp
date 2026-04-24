@@ -1331,8 +1331,16 @@ void process_outputs(channel_t* channel, int cur_scan_freq) {
 
     std::vector<DecodedMessage> decoded_messages;
 #ifdef NFM
-    if (meta_fparms != NULL && has_signal && (meta_fparms->modulation == MOD_AIS || meta_fparms->modulation == MOD_DSC)) {
+    if (meta_fparms != NULL && (meta_fparms->modulation == MOD_AIS || meta_fparms->modulation == MOD_DSC)) {
         decode_digital_messages(meta_fparms, channel->waveout, (size_t)WAVE_BATCH, &decoded_messages);
+        for (size_t m = 0; m < decoded_messages.size(); ++m) {
+            meta_fparms->decoded_counter++;
+            if (decoded_messages[m].crc_ok) {
+                meta_fparms->decoded_crc_ok_counter++;
+            } else {
+                meta_fparms->decoded_crc_bad_counter++;
+            }
+        }
     }
 #endif /* NFM */
 
@@ -1831,6 +1839,60 @@ static void output_channel_activity_counters(FILE* f) {
     fprintf(f, "\n");
 }
 
+static void output_channel_decoded_counters(FILE* f) {
+    fprintf(f,
+            "# HELP channel_decoded_counter Count of decoded digital messages.\n"
+            "# TYPE channel_decoded_counter counter\n");
+
+    for (int i = 0; i < device_count; i++) {
+        device_t* dev = devices + i;
+        for (int j = 0; j < dev->channel_count; j++) {
+            channel_t* channel = devices[i].channels + j;
+            for (int k = 0; k < channel->freq_count; k++) {
+                print_channel_metric(f, "channel_decoded_counter", channel->freqlist[k].frequency, channel->freqlist[k].label);
+                fprintf(f, "\t%zu\n", channel->freqlist[k].decoded_counter);
+            }
+        }
+    }
+    fprintf(f, "\n");
+}
+
+static void output_channel_decoded_crc_ok_counters(FILE* f) {
+    fprintf(f,
+            "# HELP channel_decoded_crc_ok_counter Count of decoded digital messages with valid CRC.\n"
+            "# TYPE channel_decoded_crc_ok_counter counter\n");
+
+    for (int i = 0; i < device_count; i++) {
+        device_t* dev = devices + i;
+        for (int j = 0; j < dev->channel_count; j++) {
+            channel_t* channel = devices[i].channels + j;
+            for (int k = 0; k < channel->freq_count; k++) {
+                print_channel_metric(f, "channel_decoded_crc_ok_counter", channel->freqlist[k].frequency, channel->freqlist[k].label);
+                fprintf(f, "\t%zu\n", channel->freqlist[k].decoded_crc_ok_counter);
+            }
+        }
+    }
+    fprintf(f, "\n");
+}
+
+static void output_channel_decoded_crc_bad_counters(FILE* f) {
+    fprintf(f,
+            "# HELP channel_decoded_crc_bad_counter Count of decoded digital messages with invalid CRC.\n"
+            "# TYPE channel_decoded_crc_bad_counter counter\n");
+
+    for (int i = 0; i < device_count; i++) {
+        device_t* dev = devices + i;
+        for (int j = 0; j < dev->channel_count; j++) {
+            channel_t* channel = devices[i].channels + j;
+            for (int k = 0; k < channel->freq_count; k++) {
+                print_channel_metric(f, "channel_decoded_crc_bad_counter", channel->freqlist[k].frequency, channel->freqlist[k].label);
+                fprintf(f, "\t%zu\n", channel->freqlist[k].decoded_crc_bad_counter);
+            }
+        }
+    }
+    fprintf(f, "\n");
+}
+
 static void output_device_buffer_overflows(FILE* f) {
     fprintf(f,
             "# HELP buffer_overflow_count Number of times a device's buffer has overflowed.\n"
@@ -1909,6 +1971,9 @@ void write_stats_file(timeval* last_stats_write) {
     output_channel_flappy_counter(file);
     output_channel_ctcss_counter(file);
     output_channel_no_ctcss_counter(file);
+    output_channel_decoded_counters(file);
+    output_channel_decoded_crc_ok_counters(file);
+    output_channel_decoded_crc_bad_counters(file);
     output_device_buffer_overflows(file);
     output_output_overruns(file);
     output_input_overruns(file);

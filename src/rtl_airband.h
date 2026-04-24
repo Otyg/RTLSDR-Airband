@@ -333,6 +333,9 @@ struct freq_t {
     float ampfactor;   // multiplier to increase / decrease volume
     Squelch squelch;
     size_t active_counter;         // count of loops where channel has signal
+    size_t decoded_counter;        // count of decoded digital messages
+    size_t decoded_crc_ok_counter; // count of decoded digital messages with valid CRC
+    size_t decoded_crc_bad_counter;// count of decoded digital messages with invalid CRC
     NotchFilter notch_filter;      // notch filter - good to remove CTCSS tones
     LowpassFilter lowpass_filter;  // lowpass filter, applied to I/Q after derotation, set at bandwidth/2 to remove out of band noise
     enum modulations modulation;

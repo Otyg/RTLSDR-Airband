@@ -606,6 +606,24 @@ void* demodulate(void* params) {
 
                     float& waveout = channel->waveout[j];
 
+                    bool const is_digital_mode = (fparms->modulation == MOD_AIS || fparms->modulation == MOD_DSC);
+
+                    // For digital modes (AIS/DSC), always compute discriminator output so decoder input
+                    // remains continuous even if squelch briefly closes between bursts.
+                    if (is_digital_mode) {
+                        if (fm_demod == FM_FAST_ATAN2) {
+                            waveout = polar_disc_fast(real, imag, channel->pr, channel->pj);
+                        } else if (fm_demod == FM_QUADRI_DEMOD) {
+                            waveout = fm_quadri_demod(real, imag, channel->pr, channel->pj);
+                        }
+                        channel->pr = real;
+                        channel->pj = imag;
+
+                        // Keep DC centered but avoid NFM voice smoothing for bit transitions.
+                        fparms->agcavgfast = fparms->agcavgfast * 0.995f + waveout * 0.005f;
+                        waveout -= fparms->agcavgfast;
+                    }
+
                     // If squelch sees power then do modulation-specific processing
                     if (fparms->squelch.should_process_audio()) {
                         if (fparms->modulation == MOD_AM) {
@@ -637,19 +655,6 @@ void* demodulate(void* params) {
 
                             // save off waveout before notch and ampfactor
                             channel->prev_waveout = waveout;
-                        } else if (fparms->modulation == MOD_AIS || fparms->modulation == MOD_DSC) {
-                            // Digital modes use FM discriminator output without de-emphasis.
-                            if (fm_demod == FM_FAST_ATAN2) {
-                                waveout = polar_disc_fast(real, imag, channel->pr, channel->pj);
-                            } else if (fm_demod == FM_QUADRI_DEMOD) {
-                                waveout = fm_quadri_demod(real, imag, channel->pr, channel->pj);
-                            }
-                            channel->pr = real;
-                            channel->pj = imag;
-
-                            // Keep DC centered but avoid NFM voice smoothing for bit transitions.
-                            fparms->agcavgfast = fparms->agcavgfast * 0.995f + waveout * 0.005f;
-                            waveout -= fparms->agcavgfast;
                         }
 #endif /* NFM */
 
@@ -682,7 +687,10 @@ void* demodulate(void* params) {
 
                         // Squelch is closed
                     } else {
-                        waveout = 0;
+                        // Keep digital discriminator samples for decoder continuity across short squelch gaps.
+                        if (!is_digital_mode) {
+                            waveout = 0;
+                        }
                         if (channel->has_iq_outputs) {
                             channel->iq_out[2 * (j - AGC_EXTRA)] = 0;
                             channel->iq_out[2 * (j - AGC_EXTRA) + 1] = 0;

@@ -542,6 +542,9 @@ static struct freq_t* mk_freqlist(int n) {
         fl[i].ampfactor = 1.0f;
         fl[i].squelch = Squelch();
         fl[i].active_counter = 0;
+        fl[i].decoded_counter = 0;
+        fl[i].decoded_crc_ok_counter = 0;
+        fl[i].decoded_crc_bad_counter = 0;
         fl[i].modulation = MOD_AM;
     }
     return fl;
