@@ -637,6 +637,19 @@ void* demodulate(void* params) {
 
                             // save off waveout before notch and ampfactor
                             channel->prev_waveout = waveout;
+                        } else if (fparms->modulation == MOD_AIS || fparms->modulation == MOD_DSC) {
+                            // Digital modes use FM discriminator output without de-emphasis.
+                            if (fm_demod == FM_FAST_ATAN2) {
+                                waveout = polar_disc_fast(real, imag, channel->pr, channel->pj);
+                            } else if (fm_demod == FM_QUADRI_DEMOD) {
+                                waveout = fm_quadri_demod(real, imag, channel->pr, channel->pj);
+                            }
+                            channel->pr = real;
+                            channel->pj = imag;
+
+                            // Keep DC centered but avoid NFM voice smoothing for bit transitions.
+                            fparms->agcavgfast = fparms->agcavgfast * 0.995f + waveout * 0.005f;
+                            waveout -= fparms->agcavgfast;
                         }
 #endif /* NFM */
 

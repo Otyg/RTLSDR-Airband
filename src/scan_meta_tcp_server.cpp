@@ -228,6 +228,42 @@ void scan_meta_tcp_server_write(scan_meta_tcp_server_data* sdata, int device_idx
     }
 }
 
+void scan_meta_tcp_server_write_decoded(scan_meta_tcp_server_data* sdata, int device_idx, int freq_hz, char const* label, char const* modulation, char const* msg_type,
+                                        char const* payload, bool crc_ok, int mmsi) {
+    accept_client_if_available(sdata);
+    send_hello_if_needed(sdata);
+
+    if (sdata->client_socket == -1 || !sdata->hello_sent) {
+        return;
+    }
+
+    std::string msg = "{\"v\":1,\"seq\":";
+    msg += std::to_string(sdata->seq++);
+    msg += ",\"event\":\"decoded\",\"device\":";
+    msg += std::to_string(device_idx);
+    msg += ",\"freq_hz\":";
+    msg += std::to_string(freq_hz);
+    msg += ",\"label\":\"";
+    append_json_escaped_string(&msg, label);
+    msg += "\",\"modulation\":\"";
+    append_json_escaped_string(&msg, modulation);
+    msg += "\",\"msg_type\":\"";
+    append_json_escaped_string(&msg, msg_type);
+    msg += "\",\"crc_ok\":";
+    msg += (crc_ok ? "true" : "false");
+    msg += ",\"mmsi\":";
+    msg += std::to_string(mmsi);
+    msg += ",\"payload\":\"";
+    append_json_escaped_string(&msg, payload);
+    msg += "\"}\n";
+
+    ssize_t sent = send(sdata->client_socket, msg.data(), msg.size(), MSG_DONTWAIT | MSG_NOSIGNAL);
+    if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        log(LOG_INFO, "scan_meta_tcp_server: client disconnected on %s:%s (%s)\n", sdata->bind_address, sdata->bind_port, strerror(errno));
+        close_client(sdata);
+    }
+}
+
 void scan_meta_tcp_server_shutdown(scan_meta_tcp_server_data* sdata) {
     close_client(sdata);
     close_listener(sdata);

@@ -298,7 +298,9 @@ enum modulations {
     MOD_AM
 #ifdef NFM
     ,
-    MOD_NFM
+    MOD_NFM,
+    MOD_AIS,
+    MOD_DSC
 #endif /* NFM */
 };
 
@@ -334,6 +336,24 @@ struct freq_t {
     NotchFilter notch_filter;      // notch filter - good to remove CTCSS tones
     LowpassFilter lowpass_filter;  // lowpass filter, applied to I/Q after derotation, set at bandwidth/2 to remove out of band noise
     enum modulations modulation;
+
+    // AIS decoder state (POD only; freq_t is allocated via XCALLOC)
+    uint8_t ais_in_frame;
+    uint8_t ais_pending_ones;
+    uint8_t ais_nrzi_prev_valid;
+    uint8_t ais_nrzi_prev;
+    uint16_t ais_debit_len;
+    uint32_t ais_resample_phase;
+    uint8_t ais_debit_buf[2048];
+
+    // DSC decoder state
+    uint32_t dsc_phase;
+    float dsc_accum;
+    uint16_t dsc_word;
+    uint8_t dsc_word_bits;
+    uint8_t dsc_word_count;
+    uint16_t dsc_words[96];
+    uint32_t dsc_last_hash;
 };
 struct channel_t {
     float wavein[WAVE_LEN];      // FFT output waveform
@@ -499,6 +519,8 @@ void udp_stream_server_shutdown(udp_stream_server_data* sdata);
 // scan_meta_udp.cpp
 bool scan_meta_udp_init(scan_meta_udp_data* sdata);
 void scan_meta_udp_write(scan_meta_udp_data* sdata, int device_idx, int freq_hz, char const* label, bool squelch_open);
+void scan_meta_udp_write_decoded(scan_meta_udp_data* sdata, int device_idx, int freq_hz, char const* label, char const* modulation, char const* msg_type,
+                                 char const* payload, bool crc_ok, int mmsi);
 void scan_meta_udp_shutdown(scan_meta_udp_data* sdata);
 
 // tcp_stream_server.cpp
@@ -510,6 +532,8 @@ void tcp_stream_server_shutdown(tcp_stream_server_data* sdata);
 // scan_meta_tcp_server.cpp
 bool scan_meta_tcp_server_init(scan_meta_tcp_server_data* sdata);
 void scan_meta_tcp_server_write(scan_meta_tcp_server_data* sdata, int device_idx, int freq_hz, char const* label, bool squelch_open);
+void scan_meta_tcp_server_write_decoded(scan_meta_tcp_server_data* sdata, int device_idx, int freq_hz, char const* label, char const* modulation, char const* msg_type,
+                                        char const* payload, bool crc_ok, int mmsi);
 void scan_meta_tcp_server_shutdown(scan_meta_tcp_server_data* sdata);
 
 // file_cmd_tcp_server.cpp

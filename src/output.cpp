@@ -42,11 +42,15 @@
 #include <syslog.h>
 #include <cassert>
 #include <cerrno>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <functional>
+#include <iomanip>
 #include <sstream>
 #include <string>
+#include <vector>
 #include "config.h"
 #ifdef WITH_FLAC_FILE_OUTPUT
 #include <FLAC/stream_encoder.h>
@@ -54,6 +58,774 @@
 #include "helper_functions.h"
 #include "input-common.h"
 #include "rtl_airband.h"
+
+namespace {
+struct DecodedMessage {
+    std::string modulation;
+    std::string msg_type;
+    std::string payload;
+    bool crc_ok;
+    int mmsi;
+};
+
+static uint16_t crc16_x25(uint8_t const* data, size_t len) {
+    uint16_t crc = 0xffff;
+    for (size_t i = 0; i < len; ++i) {
+        crc ^= data[i];
+        for (int b = 0; b < 8; ++b) {
+            if (crc & 1) {
+                crc = (crc >> 1) ^ 0x8408;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    return (uint16_t)(~crc);
+}
+
+static uint32_t get_bits_be(uint8_t const* data, int bit_offset, int bit_count) {
+    uint32_t value = 0;
+    for (int i = 0; i < bit_count; ++i) {
+        int const abs_bit = bit_offset + i;
+        uint8_t const byte = data[abs_bit / 8];
+        int const shift = 7 - (abs_bit % 8);
+        value = (value << 1) | ((byte >> shift) & 0x1);
+    }
+    return value;
+}
+
+static std::string bytes_to_hex(uint8_t const* data, size_t len) {
+    static char const* hexdigits = "0123456789abcdef";
+    std::string out;
+    out.reserve(len * 2);
+    for (size_t i = 0; i < len; ++i) {
+        unsigned char b = data[i];
+        out.push_back(hexdigits[(b >> 4) & 0x0f]);
+        out.push_back(hexdigits[b & 0x0f]);
+    }
+    return out;
+}
+
+static void append_json_escaped(std::string* dst, std::string const& src) {
+    for (size_t i = 0; i < src.size(); ++i) {
+        char const c = src[i];
+        switch (c) {
+            case '\"':
+                *dst += "\\\"";
+                break;
+            case '\\':
+                *dst += "\\\\";
+                break;
+            case '\b':
+                *dst += "\\b";
+                break;
+            case '\f':
+                *dst += "\\f";
+                break;
+            case '\n':
+                *dst += "\\n";
+                break;
+            case '\r':
+                *dst += "\\r";
+                break;
+            case '\t':
+                *dst += "\\t";
+                break;
+            default:
+                *dst += c;
+                break;
+        }
+    }
+}
+
+static int32_t get_bits_be_signed(uint8_t const* data, int bit_offset, int bit_count) {
+    uint32_t const raw = get_bits_be(data, bit_offset, bit_count);
+    uint32_t const sign_mask = 1u << (bit_count - 1);
+    if ((raw & sign_mask) == 0) {
+        return (int32_t)raw;
+    }
+    uint32_t const full_mask = (bit_count == 32) ? 0xffffffffu : ((1u << bit_count) - 1u);
+    return (int32_t)(raw | (~full_mask));
+}
+
+static std::string ais_sixbit_to_text(uint8_t const* data, int bit_offset, int char_count) {
+    std::string out;
+    out.reserve((size_t)char_count);
+    for (int i = 0; i < char_count; ++i) {
+        uint8_t const v = (uint8_t)get_bits_be(data, bit_offset + i * 6, 6);
+        char c;
+        if (v == 0) {
+            c = '@';
+        } else if (v >= 1 && v <= 26) {
+            c = (char)('A' + (v - 1));
+        } else if (v == 32) {
+            c = ' ';
+        } else if (v >= 48 && v <= 57) {
+            c = (char)('0' + (v - 48));
+        } else {
+            c = ' ';
+        }
+        out.push_back(c);
+    }
+
+    while (!out.empty() && (out.back() == '@' || out.back() == ' ')) {
+        out.pop_back();
+    }
+    return out;
+}
+
+static bool ais_valid_lon(double lon) {
+    return lon >= -180.0 && lon <= 180.0;
+}
+
+static bool ais_valid_lat(double lat) {
+    return lat >= -90.0 && lat <= 90.0;
+}
+
+static std::string ais_decoded_payload_json(uint8_t const* bytes, int payload_len, int ais_type, int mmsi) {
+    std::string raw_hex = bytes_to_hex(bytes, (size_t)payload_len);
+    std::ostringstream os;
+    os << "{";
+    os << "\"type\":" << ais_type << ",";
+    os << "\"mmsi\":" << mmsi << ",";
+    os << "\"raw_hex\":\"" << raw_hex << "\"";
+
+    if (ais_type >= 1 && ais_type <= 3) {
+        int const nav_status = (int)get_bits_be(bytes, 38, 4);
+        int const rot_raw = (int)get_bits_be_signed(bytes, 42, 8);
+        int const sog_raw = (int)get_bits_be(bytes, 50, 10);
+        int32_t const lon_raw = get_bits_be_signed(bytes, 61, 28);
+        int32_t const lat_raw = get_bits_be_signed(bytes, 89, 27);
+        int const cog_raw = (int)get_bits_be(bytes, 116, 12);
+        int const heading = (int)get_bits_be(bytes, 128, 9);
+        int const timestamp = (int)get_bits_be(bytes, 137, 6);
+
+        double const lon = lon_raw / 600000.0;
+        double const lat = lat_raw / 600000.0;
+
+        os << ",\"nav_status\":" << nav_status;
+        if (rot_raw == -128) {
+            os << ",\"rot\":null";
+        } else {
+            os << ",\"rot\":" << rot_raw;
+        }
+        if (sog_raw >= 1023) {
+            os << ",\"sog_kn\":null";
+        } else {
+            os << std::fixed << std::setprecision(1);
+            os << ",\"sog_kn\":" << (sog_raw / 10.0);
+        }
+        if (ais_valid_lon(lon) && ais_valid_lat(lat)) {
+            os << std::fixed << std::setprecision(6);
+            os << ",\"lon\":" << lon << ",\"lat\":" << lat;
+        } else {
+            os << ",\"lon\":null,\"lat\":null";
+        }
+        if (cog_raw >= 3600) {
+            os << ",\"cog_deg\":null";
+        } else {
+            os << std::fixed << std::setprecision(1);
+            os << ",\"cog_deg\":" << (cog_raw / 10.0);
+        }
+        os << ",\"heading\":" << (heading >= 511 ? -1 : heading);
+        os << ",\"timestamp\":" << timestamp;
+    } else if (ais_type == 18 || ais_type == 19) {
+        int const sog_raw = (int)get_bits_be(bytes, 46, 10);
+        int32_t const lon_raw = get_bits_be_signed(bytes, 57, 28);
+        int32_t const lat_raw = get_bits_be_signed(bytes, 85, 27);
+        int const cog_raw = (int)get_bits_be(bytes, 112, 12);
+        int const heading = (int)get_bits_be(bytes, 124, 9);
+        int const timestamp = (int)get_bits_be(bytes, 133, 6);
+        double const lon = lon_raw / 600000.0;
+        double const lat = lat_raw / 600000.0;
+
+        if (sog_raw >= 1023) {
+            os << ",\"sog_kn\":null";
+        } else {
+            os << std::fixed << std::setprecision(1);
+            os << ",\"sog_kn\":" << (sog_raw / 10.0);
+        }
+        if (ais_valid_lon(lon) && ais_valid_lat(lat)) {
+            os << std::fixed << std::setprecision(6);
+            os << ",\"lon\":" << lon << ",\"lat\":" << lat;
+        } else {
+            os << ",\"lon\":null,\"lat\":null";
+        }
+        if (cog_raw >= 3600) {
+            os << ",\"cog_deg\":null";
+        } else {
+            os << std::fixed << std::setprecision(1);
+            os << ",\"cog_deg\":" << (cog_raw / 10.0);
+        }
+        os << ",\"heading\":" << (heading >= 511 ? -1 : heading);
+        os << ",\"timestamp\":" << timestamp;
+    } else if (ais_type == 5) {
+        int const imo = (int)get_bits_be(bytes, 40, 30);
+        std::string const callsign = ais_sixbit_to_text(bytes, 70, 7);
+        std::string const shipname = ais_sixbit_to_text(bytes, 112, 20);
+        int const ship_type = (int)get_bits_be(bytes, 232, 8);
+        int const to_bow = (int)get_bits_be(bytes, 240, 9);
+        int const to_stern = (int)get_bits_be(bytes, 249, 9);
+        int const to_port = (int)get_bits_be(bytes, 258, 6);
+        int const to_starboard = (int)get_bits_be(bytes, 264, 6);
+
+        std::string esc_callsign;
+        std::string esc_shipname;
+        append_json_escaped(&esc_callsign, callsign);
+        append_json_escaped(&esc_shipname, shipname);
+
+        os << ",\"imo\":" << imo;
+        os << ",\"callsign\":\"" << esc_callsign << "\"";
+        os << ",\"shipname\":\"" << esc_shipname << "\"";
+        os << ",\"ship_type\":" << ship_type;
+        os << ",\"dim_to_bow\":" << to_bow;
+        os << ",\"dim_to_stern\":" << to_stern;
+        os << ",\"dim_to_port\":" << to_port;
+        os << ",\"dim_to_starboard\":" << to_starboard;
+    } else if (ais_type == 24) {
+        int const part_no = (int)get_bits_be(bytes, 38, 2);
+        os << ",\"part_no\":" << part_no;
+        if (part_no == 0) {
+            std::string const shipname = ais_sixbit_to_text(bytes, 40, 20);
+            std::string esc_shipname;
+            append_json_escaped(&esc_shipname, shipname);
+            os << ",\"shipname\":\"" << esc_shipname << "\"";
+        } else if (part_no == 1) {
+            int const ship_type = (int)get_bits_be(bytes, 40, 8);
+            std::string const vendor = ais_sixbit_to_text(bytes, 48, 3);
+            std::string const callsign = ais_sixbit_to_text(bytes, 66, 7);
+            int const to_bow = (int)get_bits_be(bytes, 108, 9);
+            int const to_stern = (int)get_bits_be(bytes, 117, 9);
+            int const to_port = (int)get_bits_be(bytes, 126, 6);
+            int const to_starboard = (int)get_bits_be(bytes, 132, 6);
+
+            std::string esc_vendor;
+            std::string esc_callsign;
+            append_json_escaped(&esc_vendor, vendor);
+            append_json_escaped(&esc_callsign, callsign);
+            os << ",\"ship_type\":" << ship_type;
+            os << ",\"vendor\":\"" << esc_vendor << "\"";
+            os << ",\"callsign\":\"" << esc_callsign << "\"";
+            os << ",\"dim_to_bow\":" << to_bow;
+            os << ",\"dim_to_stern\":" << to_stern;
+            os << ",\"dim_to_port\":" << to_port;
+            os << ",\"dim_to_starboard\":" << to_starboard;
+        }
+    }
+
+    os << "}";
+    return os.str();
+}
+
+static void try_decode_ais_frame(freq_t* fparms, std::vector<DecodedMessage>* out) {
+    if (fparms->ais_debit_len < 40) {
+        return;
+    }
+
+    int const byte_count = fparms->ais_debit_len / 8;
+    if (byte_count < 5 || byte_count > 256) {
+        return;
+    }
+
+    uint8_t bytes[256];
+    memset(bytes, 0, sizeof(bytes));
+
+    for (int i = 0; i < byte_count; ++i) {
+        uint8_t v = 0;
+        for (int bit = 0; bit < 8; ++bit) {
+            int idx = i * 8 + bit;
+            if (idx >= fparms->ais_debit_len) {
+                break;
+            }
+            v |= (uint8_t)(fparms->ais_debit_buf[idx] & 0x1) << bit;
+        }
+        bytes[i] = v;
+    }
+
+    int const payload_len = byte_count - 2;
+    uint16_t const rx_fcs = (uint16_t)bytes[payload_len] | ((uint16_t)bytes[payload_len + 1] << 8);
+    uint16_t const calc_fcs = crc16_x25(bytes, (size_t)payload_len);
+    if (rx_fcs != calc_fcs) {
+        return;
+    }
+
+    if (payload_len < 5) {
+        return;
+    }
+
+    int const ais_type = (int)get_bits_be(bytes, 0, 6);
+    if (ais_type < 1 || ais_type > 27) {
+        return;
+    }
+    int const mmsi = (int)get_bits_be(bytes, 8, 30);
+
+    DecodedMessage msg;
+    msg.modulation = "ais";
+    msg.msg_type = "ais_frame";
+    msg.payload = ais_decoded_payload_json(bytes, payload_len, ais_type, mmsi);
+    msg.crc_ok = true;
+    msg.mmsi = mmsi;
+    out->push_back(msg);
+}
+
+static void ais_decode_batch(freq_t* fparms, float const* samples, size_t sample_count, std::vector<DecodedMessage>* out) {
+    // Symbol clock at 9600 symbols/sec from 16k discriminator samples.
+    constexpr uint32_t kSymbolRate = 9600;
+
+    for (size_t i = 0; i < sample_count; ++i) {
+        fparms->ais_resample_phase += kSymbolRate;
+        if (fparms->ais_resample_phase < WAVE_RATE) {
+            continue;
+        }
+        fparms->ais_resample_phase -= WAVE_RATE;
+
+        uint8_t const nrzi_level = samples[i] >= 0.0f ? 1 : 0;
+        if (!fparms->ais_nrzi_prev_valid) {
+            fparms->ais_nrzi_prev = nrzi_level;
+            fparms->ais_nrzi_prev_valid = 1;
+            continue;
+        }
+
+        // NRZI decode: transition=0, no transition=1
+        uint8_t const bit = (nrzi_level == fparms->ais_nrzi_prev) ? 1 : 0;
+        fparms->ais_nrzi_prev = nrzi_level;
+
+        if (bit) {
+            if (fparms->ais_pending_ones < 31) {
+                fparms->ais_pending_ones++;
+            }
+            continue;
+        }
+
+        // bit == 0
+        if (fparms->ais_pending_ones == 6) {
+            if (fparms->ais_in_frame) {
+                try_decode_ais_frame(fparms, out);
+            }
+            fparms->ais_in_frame = 1;
+            fparms->ais_debit_len = 0;
+        } else if (fparms->ais_pending_ones == 5) {
+            if (fparms->ais_in_frame) {
+                for (int k = 0; k < 5; ++k) {
+                    if (fparms->ais_debit_len >= (int)sizeof(fparms->ais_debit_buf)) {
+                        fparms->ais_in_frame = 0;
+                        fparms->ais_debit_len = 0;
+                        break;
+                    }
+                    fparms->ais_debit_buf[fparms->ais_debit_len++] = 1;
+                }
+            }
+        } else if (fparms->ais_pending_ones > 6) {
+            fparms->ais_in_frame = 0;
+            fparms->ais_debit_len = 0;
+        } else if (fparms->ais_in_frame) {
+            for (int k = 0; k < fparms->ais_pending_ones; ++k) {
+                if (fparms->ais_debit_len >= (int)sizeof(fparms->ais_debit_buf)) {
+                    fparms->ais_in_frame = 0;
+                    fparms->ais_debit_len = 0;
+                    break;
+                }
+                fparms->ais_debit_buf[fparms->ais_debit_len++] = 1;
+            }
+            if (fparms->ais_in_frame) {
+                if (fparms->ais_debit_len < (int)sizeof(fparms->ais_debit_buf)) {
+                    fparms->ais_debit_buf[fparms->ais_debit_len++] = 0;
+                } else {
+                    fparms->ais_in_frame = 0;
+                    fparms->ais_debit_len = 0;
+                }
+            }
+        }
+        fparms->ais_pending_ones = 0;
+    }
+}
+
+static bool dsc_is_format(uint8_t symbol) {
+    return symbol == 112 || symbol == 114 || symbol == 116 || symbol == 120 || symbol == 123 || symbol == 102;
+}
+
+static bool dsc_is_eos(uint8_t symbol) {
+    return symbol == 117 || symbol == 122 || symbol == 127;
+}
+
+static const char* dsc_format_name(uint8_t symbol) {
+    switch (symbol) {
+        case 112:
+            return "distress";
+        case 114:
+            return "group";
+        case 116:
+            return "all_ships";
+        case 120:
+            return "individual";
+        case 123:
+            return "semi_auto";
+        case 102:
+            return "geo_area";
+        default:
+            return "unknown";
+    }
+}
+
+static const char* dsc_category_name(uint8_t symbol) {
+    switch (symbol) {
+        case 112:
+            return "distress";
+        case 110:
+            return "urgency";
+        case 108:
+            return "safety";
+        case 100:
+            return "routine";
+        default:
+            return "unknown";
+    }
+}
+
+static const char* dsc_telecommand_name(uint8_t symbol) {
+    switch (symbol) {
+        case 100:
+            return "f3e_g3e_simplex";
+        case 101:
+            return "f3e_g3e_duplex";
+        case 109:
+            return "j3e_rt";
+        case 126:
+            return "no_information";
+        default:
+            return "unknown";
+    }
+}
+
+static const char* dsc_eos_name(uint8_t symbol) {
+    switch (symbol) {
+        case 117:
+            return "ack_rq";
+        case 122:
+            return "ack_bq";
+        case 127:
+            return "eos";
+        default:
+            return "unknown";
+    }
+}
+
+static const char* dsc_distress_nature_name(uint8_t symbol) {
+    switch (symbol) {
+        case 100:
+            return "fire_explosion";
+        case 101:
+            return "flooding";
+        case 102:
+            return "collision";
+        case 103:
+            return "grounding";
+        case 104:
+            return "listing_capsizing";
+        case 105:
+            return "sinking";
+        case 106:
+            return "disabled_adrift";
+        case 107:
+            return "undesignated_distress";
+        case 108:
+            return "abandoning_ship";
+        case 109:
+            return "piracy_attack";
+        case 110:
+            return "man_overboard";
+        case 112:
+            return "epirb_emission";
+        default:
+            return "unknown";
+    }
+}
+
+static bool dsc_symbol_to_digits(uint8_t symbol, char* out_a, char* out_b) {
+    if (symbol > 99) {
+        return false;
+    }
+    *out_a = (char)('0' + (symbol / 10));
+    *out_b = (char)('0' + (symbol % 10));
+    return true;
+}
+
+static std::string dsc_symbols_to_digit_string(uint8_t const* symbols, size_t count) {
+    std::string out;
+    out.reserve(count * 2);
+    for (size_t i = 0; i < count; ++i) {
+        char a = 0;
+        char b = 0;
+        if (!dsc_symbol_to_digits(symbols[i], &a, &b)) {
+            return std::string();
+        }
+        out.push_back(a);
+        out.push_back(b);
+    }
+    return out;
+}
+
+static int dsc_mmsi_to_int(std::string const& digits10) {
+    if (digits10.size() < 9) {
+        return -1;
+    }
+    int mmsi = 0;
+    for (size_t i = 0; i < 9; ++i) {
+        if (digits10[i] < '0' || digits10[i] > '9') {
+            return -1;
+        }
+        mmsi = mmsi * 10 + (digits10[i] - '0');
+    }
+    return mmsi;
+}
+
+static bool dsc_word_to_symbol(uint16_t word10, uint8_t* symbol_out) {
+    uint8_t const info = (uint8_t)(word10 & 0x7f);
+    uint8_t const ones = (uint8_t)__builtin_popcount((unsigned int)info);
+    uint8_t const zeros = (uint8_t)(7 - ones);
+    uint8_t const check = (uint8_t)((((word10 >> 7) & 0x1) << 2) | (((word10 >> 8) & 0x1) << 1) | ((word10 >> 9) & 0x1));
+    if (check != zeros) {
+        return false;
+    }
+    *symbol_out = info;
+    return true;
+}
+
+static uint8_t dsc_calc_ecc(uint8_t format, uint8_t const* address, size_t address_len, uint8_t category, uint8_t const* self_id, size_t self_len, uint8_t const* message,
+                            size_t message_len, uint8_t eos) {
+    uint8_t ecc = format;
+    for (size_t i = 0; i < address_len; ++i) {
+        ecc ^= address[i];
+    }
+    ecc ^= category;
+    for (size_t i = 0; i < self_len; ++i) {
+        ecc ^= self_id[i];
+    }
+    for (size_t i = 0; i < message_len; ++i) {
+        ecc ^= message[i];
+    }
+    ecc ^= eos;
+    return ecc;
+}
+
+static bool dsc_parse_logical(uint8_t const* symbols, size_t n, DecodedMessage* out_msg, size_t* consumed) {
+    if (n < 14) {
+        return false;
+    }
+    size_t i = 0;
+    uint8_t const format = symbols[i];
+    if (!dsc_is_format(format)) {
+        return false;
+    }
+    i++;
+    if (i < n && symbols[i] == format) {
+        i++;  // tolerate duplicate format character
+    }
+
+    size_t const address_len = (format == 112 || format == 116) ? 0u : 5u;
+    if (i + address_len + 1 + 5 + 2 > n) {
+        return false;
+    }
+
+    uint8_t address[5] = {0};
+    for (size_t a = 0; a < address_len; ++a) {
+        address[a] = symbols[i++];
+    }
+
+    uint8_t const category = symbols[i++];
+    uint8_t self_id[5] = {0};
+    for (size_t s = 0; s < 5; ++s) {
+        self_id[s] = symbols[i++];
+    }
+
+    uint8_t message[16] = {0};
+    size_t message_len = 0;
+    while (i < n && !dsc_is_eos(symbols[i]) && message_len < 16) {
+        message[message_len++] = symbols[i++];
+    }
+    if (i >= n || !dsc_is_eos(symbols[i])) {
+        return false;
+    }
+    uint8_t const eos = symbols[i++];
+    if (i >= n) {
+        return false;
+    }
+    uint8_t const ecc = symbols[i++];
+    if (i < n && dsc_is_eos(symbols[i])) {
+        i++;
+    }
+
+    uint8_t const calc_ecc = dsc_calc_ecc(format, address, address_len, category, self_id, 5, message, message_len, eos);
+    if (ecc != calc_ecc) {
+        return false;
+    }
+
+    std::string const address_digits = dsc_symbols_to_digit_string(address, address_len);
+    std::string const self_digits = dsc_symbols_to_digit_string(self_id, 5);
+    if ((address_len > 0 && address_digits.empty()) || self_digits.empty()) {
+        return false;
+    }
+
+    std::ostringstream payload;
+    payload << "{";
+    payload << "\"format_code\":" << (unsigned int)format << ",";
+    payload << "\"format\":\"" << dsc_format_name(format) << "\",";
+    if (address_len > 0) {
+        payload << "\"address\":\"" << address_digits << "\",";
+    } else {
+        payload << "\"address\":\"\",";
+    }
+    payload << "\"category_code\":" << (unsigned int)category << ",";
+    payload << "\"category\":\"" << dsc_category_name(category) << "\",";
+    payload << "\"self_id\":\"" << self_digits << "\",";
+    payload << "\"eos_code\":" << (unsigned int)eos << ",";
+    payload << "\"eos\":\"" << dsc_eos_name(eos) << "\",";
+    payload << "\"ecc\":" << (unsigned int)ecc << ",";
+    payload << "\"telecommand1_code\":" << (message_len > 0 ? (unsigned int)message[0] : 0) << ",";
+    payload << "\"telecommand1\":\"" << (message_len > 0 ? dsc_telecommand_name(message[0]) : "none") << "\",";
+    payload << "\"telecommand2_code\":" << (message_len > 1 ? (unsigned int)message[1] : 0) << ",";
+    payload << "\"telecommand2\":\"" << (message_len > 1 ? dsc_telecommand_name(message[1]) : "none") << "\"";
+
+    if (format == 112) {
+        payload << ",\"distress_nature_code\":" << (message_len > 0 ? (unsigned int)message[0] : 0);
+        payload << ",\"distress_nature\":\"" << (message_len > 0 ? dsc_distress_nature_name(message[0]) : "none") << "\"";
+        if (message_len >= 6) {
+            std::string const pos_digits = dsc_symbols_to_digit_string(message + 1, 5);
+            if (!pos_digits.empty()) {
+                payload << ",\"distress_position\":\"" << pos_digits << "\"";
+            }
+        }
+        if (message_len >= 8) {
+            std::string const utc_digits = dsc_symbols_to_digit_string(message + 6, 2);
+            if (!utc_digits.empty()) {
+                payload << ",\"distress_utc\":\"" << utc_digits << "\"";
+            }
+        }
+    } else if (message_len > 2) {
+        std::string const msg_digits = dsc_symbols_to_digit_string(message + 2, message_len - 2);
+        if (!msg_digits.empty()) {
+            payload << ",\"message_digits\":\"" << msg_digits << "\"";
+        }
+    }
+
+    payload << "}";
+
+    out_msg->modulation = "dsc";
+    out_msg->msg_type = "dsc_message";
+    out_msg->payload = payload.str();
+    out_msg->crc_ok = true;
+    out_msg->mmsi = dsc_mmsi_to_int(self_digits);
+    *consumed = i;
+    return true;
+}
+
+static bool dsc_try_parse_from_symbol_stream(std::vector<uint8_t> const& symbols, DecodedMessage* out_msg) {
+    if (symbols.size() < 14) {
+        return false;
+    }
+
+    for (size_t start = 0; start + 14 <= symbols.size(); ++start) {
+        if (!dsc_is_format(symbols[start])) {
+            continue;
+        }
+        size_t consumed = 0;
+        if (dsc_parse_logical(symbols.data() + start, symbols.size() - start, out_msg, &consumed)) {
+            return true;
+        }
+
+        if (start + 22 > symbols.size()) {
+            continue;
+        }
+        size_t const max_logical = std::min((size_t)40, symbols.size() - start - 5);
+        std::vector<uint8_t> logical;
+        logical.reserve(max_logical);
+        for (size_t i = 0; i < max_logical; ++i) {
+            uint8_t const dx = symbols[start + i];
+            uint8_t const rx = symbols[start + i + 5];
+            logical.push_back(dx == rx ? dx : dx);
+        }
+        consumed = 0;
+        if (dsc_parse_logical(logical.data(), logical.size(), out_msg, &consumed)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void dsc_try_emit_from_buffer(freq_t* fparms, std::vector<DecodedMessage>* out) {
+    if (fparms->dsc_word_count < 24) {
+        return;
+    }
+
+    std::vector<uint8_t> symbols;
+    symbols.reserve(fparms->dsc_word_count);
+    for (uint8_t i = 0; i < fparms->dsc_word_count; ++i) {
+        uint8_t symbol = 0;
+        if (dsc_word_to_symbol(fparms->dsc_words[i], &symbol)) {
+            symbols.push_back(symbol);
+        }
+    }
+
+    DecodedMessage msg;
+    if (dsc_try_parse_from_symbol_stream(symbols, &msg)) {
+        uint32_t const hash = (uint32_t)std::hash<std::string>{}(msg.payload);
+        if (hash != 0 && hash != fparms->dsc_last_hash) {
+            out->push_back(msg);
+            fparms->dsc_last_hash = hash;
+        }
+        fparms->dsc_word_count = 0;
+        return;
+    }
+
+    if (fparms->dsc_word_count >= 90) {
+        memmove(fparms->dsc_words, fparms->dsc_words + 45, 45 * sizeof(fparms->dsc_words[0]));
+        fparms->dsc_word_count = 45;
+    }
+}
+
+static void dsc_decode_batch(freq_t* fparms, float const* samples, size_t sample_count, std::vector<DecodedMessage>* out) {
+    // DSC over FM discriminator: 1200 baud symbol clock.
+    constexpr uint32_t kSymbolRate = 1200;
+
+    for (size_t i = 0; i < sample_count; ++i) {
+        fparms->dsc_phase += kSymbolRate;
+        fparms->dsc_accum += samples[i];
+        if (fparms->dsc_phase < WAVE_RATE) {
+            continue;
+        }
+        fparms->dsc_phase -= WAVE_RATE;
+
+        uint16_t const bit = fparms->dsc_accum >= 0.0f ? 1u : 0u;
+        fparms->dsc_accum = 0.0f;
+        fparms->dsc_word |= (uint16_t)(bit << fparms->dsc_word_bits);
+        fparms->dsc_word_bits++;
+
+        if (fparms->dsc_word_bits == 10) {
+            if (fparms->dsc_word_count < (uint8_t)(sizeof(fparms->dsc_words) / sizeof(fparms->dsc_words[0]))) {
+                fparms->dsc_words[fparms->dsc_word_count++] = fparms->dsc_word;
+            }
+            fparms->dsc_word = 0;
+            fparms->dsc_word_bits = 0;
+            dsc_try_emit_from_buffer(fparms, out);
+        }
+    }
+}
+
+static void decode_digital_messages(freq_t* fparms, float const* samples, size_t sample_count, std::vector<DecodedMessage>* out) {
+#ifdef NFM
+    if (fparms->modulation == MOD_AIS) {
+        ais_decode_batch(fparms, samples, sample_count, out);
+    } else if (fparms->modulation == MOD_DSC) {
+        dsc_decode_batch(fparms, samples, sample_count, out);
+    }
+#else
+    (void)fparms;
+    (void)samples;
+    (void)sample_count;
+    (void)out;
+#endif /* NFM */
+}
+}  // namespace
 
 void shout_setup(icecast_data* icecast, mix_modes mixmode) {
     int ret;
@@ -542,10 +1314,37 @@ static bool is_udp_stream_overridden_by_file_playback(channel_t* channel, udp_st
 
 // Create all the output for a particular channel.
 void process_outputs(channel_t* channel, int cur_scan_freq) {
+    int meta_freq_idx = -1;
+    if (cur_scan_freq >= 0 && cur_scan_freq < channel->freq_count) {
+        meta_freq_idx = cur_scan_freq;
+    } else {
+        meta_freq_idx = channel->freq_idx;
+    }
+
+    freq_t* meta_fparms = (meta_freq_idx >= 0 && meta_freq_idx < channel->freq_count) ? (channel->freqlist + meta_freq_idx) : NULL;
+    bool const has_signal = (channel->axcindicate != NO_SIGNAL);
+    bool suppress_audio_output = false;
+#ifdef NFM
+    if (meta_fparms != NULL && (meta_fparms->modulation == MOD_AIS || meta_fparms->modulation == MOD_DSC)) {
+        suppress_audio_output = true;
+    }
+#endif /* NFM */
+    bool const has_audio_signal = has_signal && !suppress_audio_output;
+
+    std::vector<DecodedMessage> decoded_messages;
+#ifdef NFM
+    if (meta_fparms != NULL && has_signal && (meta_fparms->modulation == MOD_AIS || meta_fparms->modulation == MOD_DSC)) {
+        decode_digital_messages(meta_fparms, channel->waveout, (size_t)WAVE_BATCH, &decoded_messages);
+    }
+#endif /* NFM */
+
     for (int k = 0; k < channel->output_count; k++) {
         if (channel->outputs[k].enabled == false)
             continue;
         if (channel->outputs[k].type == O_ICECAST) {
+            if (suppress_audio_output) {
+                continue;
+            }
             icecast_data* icecast = (icecast_data*)(channel->outputs[k].data);
             if (icecast->shout == NULL)
                 continue;
@@ -596,8 +1395,14 @@ void process_outputs(channel_t* channel, int cur_scan_freq) {
 #endif /* WITH_FLAC_FILE_OUTPUT */
         ) {
             file_data* fdata = (file_data*)(channel->outputs[k].data);
+            bool const is_audio_file = (channel->outputs[k].type == O_FILE
+#ifdef WITH_FLAC_FILE_OUTPUT
+                                        || channel->outputs[k].type == O_FLAC_FILE
+#endif /* WITH_FLAC_FILE_OUTPUT */
+            );
+            bool const has_output_signal = is_audio_file ? has_audio_signal : has_signal;
 
-            if (fdata->continuous == false && channel->axcindicate == NO_SIGNAL && channel->outputs[k].active == false) {
+            if (fdata->continuous == false && !has_output_signal && channel->outputs[k].active == false) {
                 close_if_necessary(&channel->outputs[k]);
                 continue;
             }
@@ -613,6 +1418,11 @@ void process_outputs(channel_t* channel, int cur_scan_freq) {
             const auto& lamebuf = channel->outputs[k].lamebuf;
             int mp3_bytes = 0;
             if (channel->outputs[k].type == O_FILE) {
+                if (suppress_audio_output) {
+                    channel->outputs[k].active = false;
+                    close_if_necessary(&channel->outputs[k]);
+                    continue;
+                }
                 mp3_bytes = lame_encode_buffer_ieee_float(lame, channel->waveout, (channel->mode == MM_STEREO ? channel->waveout_r : NULL), WAVE_BATCH, lamebuf, LAMEBUF_SIZE);
                 if (mp3_bytes < 0) {
                     log(LOG_WARNING, "lame_encode_buffer_ieee_float: %d\n", mp3_bytes);
@@ -632,6 +1442,11 @@ void process_outputs(channel_t* channel, int cur_scan_freq) {
                 written = fwrite(channel->iq_out, 1, buflen, fdata->f);
 #ifdef WITH_FLAC_FILE_OUTPUT
             } else if (channel->outputs[k].type == O_FLAC_FILE) {
+                if (suppress_audio_output) {
+                    channel->outputs[k].active = false;
+                    close_if_necessary(&channel->outputs[k]);
+                    continue;
+                }
                 output_t* output = &channel->outputs[k];
                 if (!output->flac || !output->flacbuf) {
                     log(LOG_WARNING, "FLAC encoder resources missing for %s\n", fdata->file_path.c_str());
@@ -666,34 +1481,44 @@ void process_outputs(channel_t* channel, int cur_scan_freq) {
                 close_file(&channel->outputs[k]);
                 channel->outputs[k].enabled = false;
             }
-            channel->outputs[k].active = (channel->axcindicate != NO_SIGNAL);
+            channel->outputs[k].active = has_output_signal;
             gettimeofday(&fdata->last_write_time, NULL);
         } else if (channel->outputs[k].type == O_MIXER) {
+            if (suppress_audio_output) {
+                continue;
+            }
             mixer_data* mdata = (mixer_data*)(channel->outputs[k].data);
-            mixer_put_samples(mdata->mixer, mdata->input, channel->waveout, channel->axcindicate != NO_SIGNAL, WAVE_BATCH);
+            mixer_put_samples(mdata->mixer, mdata->input, channel->waveout, has_audio_signal, WAVE_BATCH);
         } else if (channel->outputs[k].type == O_FILE_CMD_TCP_SERVER) {
             file_cmd_tcp_server_data* sdata = (file_cmd_tcp_server_data*)channel->outputs[k].data;
             file_cmd_tcp_server_poll(sdata);
         } else if (channel->outputs[k].type == O_SCAN_META_UDP) {
             scan_meta_udp_data* sdata = (scan_meta_udp_data*)channel->outputs[k].data;
-            int meta_freq_idx = -1;
+            int out_meta_idx = -1;
             if (cur_scan_freq >= 0 && cur_scan_freq < channel->freq_count) {
-                meta_freq_idx = cur_scan_freq;
+                out_meta_idx = cur_scan_freq;
             } else if (sdata->continuous) {
-                meta_freq_idx = channel->freq_idx;
+                out_meta_idx = channel->freq_idx;
             }
 
-            if (meta_freq_idx >= 0 && meta_freq_idx < channel->freq_count) {
-                struct freq_t const* fparms = channel->freqlist + meta_freq_idx;
-                scan_meta_udp_write(sdata, -1, fparms->frequency, fparms->label, channel->axcindicate != NO_SIGNAL);
+            if (out_meta_idx >= 0 && out_meta_idx < channel->freq_count) {
+                struct freq_t const* fparms = channel->freqlist + out_meta_idx;
+                scan_meta_udp_write(sdata, -1, fparms->frequency, fparms->label, has_signal);
+                for (size_t m = 0; m < decoded_messages.size(); ++m) {
+                    scan_meta_udp_write_decoded(sdata, -1, fparms->frequency, fparms->label, decoded_messages[m].modulation.c_str(), decoded_messages[m].msg_type.c_str(),
+                                                decoded_messages[m].payload.c_str(), decoded_messages[m].crc_ok, decoded_messages[m].mmsi);
+                }
             }
         } else if (channel->outputs[k].type == O_UDP_STREAM) {
             udp_stream_data* sdata = (udp_stream_data*)channel->outputs[k].data;
+            if (suppress_audio_output) {
+                continue;
+            }
             if (is_udp_stream_overridden_by_file_playback(channel, sdata)) {
                 continue;
             }
 
-            if (sdata->continuous == false && channel->axcindicate == NO_SIGNAL) {
+            if (sdata->continuous == false && !has_audio_signal) {
                 continue;
             }
 
@@ -704,8 +1529,11 @@ void process_outputs(channel_t* channel, int cur_scan_freq) {
             }
         } else if (channel->outputs[k].type == O_UDP_STREAM_SERVER) {
             udp_stream_server_data* sdata = (udp_stream_server_data*)channel->outputs[k].data;
+            if (suppress_audio_output) {
+                continue;
+            }
 
-            if (sdata->continuous == false && channel->axcindicate == NO_SIGNAL) {
+            if (sdata->continuous == false && !has_audio_signal) {
                 continue;
             }
 
@@ -716,21 +1544,28 @@ void process_outputs(channel_t* channel, int cur_scan_freq) {
             }
         } else if (channel->outputs[k].type == O_SCAN_META_TCP_SERVER) {
             scan_meta_tcp_server_data* sdata = (scan_meta_tcp_server_data*)channel->outputs[k].data;
-            int meta_freq_idx = -1;
+            int out_meta_idx = -1;
             if (cur_scan_freq >= 0 && cur_scan_freq < channel->freq_count) {
-                meta_freq_idx = cur_scan_freq;
+                out_meta_idx = cur_scan_freq;
             } else if (sdata->continuous) {
-                meta_freq_idx = channel->freq_idx;
+                out_meta_idx = channel->freq_idx;
             }
 
-            if (meta_freq_idx >= 0 && meta_freq_idx < channel->freq_count) {
-                struct freq_t const* fparms = channel->freqlist + meta_freq_idx;
-                scan_meta_tcp_server_write(sdata, -1, fparms->frequency, fparms->label, channel->axcindicate != NO_SIGNAL);
+            if (out_meta_idx >= 0 && out_meta_idx < channel->freq_count) {
+                struct freq_t const* fparms = channel->freqlist + out_meta_idx;
+                scan_meta_tcp_server_write(sdata, -1, fparms->frequency, fparms->label, has_signal);
+                for (size_t m = 0; m < decoded_messages.size(); ++m) {
+                    scan_meta_tcp_server_write_decoded(sdata, -1, fparms->frequency, fparms->label, decoded_messages[m].modulation.c_str(), decoded_messages[m].msg_type.c_str(),
+                                                       decoded_messages[m].payload.c_str(), decoded_messages[m].crc_ok, decoded_messages[m].mmsi);
+                }
             }
         } else if (channel->outputs[k].type == O_TCP_STREAM_SERVER) {
             tcp_stream_server_data* sdata = (tcp_stream_server_data*)channel->outputs[k].data;
+            if (suppress_audio_output) {
+                continue;
+            }
 
-            if (sdata->continuous == false && channel->axcindicate == NO_SIGNAL) {
+            if (sdata->continuous == false && !has_audio_signal) {
                 continue;
             }
 
@@ -742,8 +1577,11 @@ void process_outputs(channel_t* channel, int cur_scan_freq) {
 
 #ifdef WITH_PULSEAUDIO
         } else if (channel->outputs[k].type == O_PULSE) {
+            if (suppress_audio_output) {
+                continue;
+            }
             pulse_data* pdata = (pulse_data*)(channel->outputs[k].data);
-            if (pdata->continuous == false && channel->axcindicate == NO_SIGNAL)
+            if (pdata->continuous == false && !has_audio_signal)
                 continue;
 
             pulse_write_stream(pdata, channel->mode, channel->waveout, channel->waveout_r, (size_t)WAVE_BATCH * sizeof(float));

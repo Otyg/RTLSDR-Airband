@@ -18,6 +18,8 @@
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -46,6 +48,8 @@ QComboBox* createModulationComboBox(QWidget* parent, QString const& value) {
     QComboBox* combo = new QComboBox(parent);
     combo->addItem("am");
     combo->addItem("nfm");
+    combo->addItem("ais");
+    combo->addItem("dsc");
     int const index = combo->findText(value.trimmed().toLower());
     combo->setCurrentIndex(index >= 0 ? index : 0);
     return combo;
@@ -247,6 +251,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), localFileMode_(fa
     connect(&audioEngine_, &AudioEngine::pcmChunk, this, &MainWindow::onAudioChunk);
     connect(&metadataReceiver_, &MetadataReceiver::channelsReceived, this, &MainWindow::onChannelsReceived);
     connect(&metadataReceiver_, &MetadataReceiver::metadataReceived, this, &MainWindow::onMetadata);
+    connect(&metadataReceiver_, &MetadataReceiver::decodedMessageReceived, this, &MainWindow::onDecodedMessage);
 
     connect(&audioReceiver_, &AudioReceiver::errorMessage, this, &MainWindow::onError);
     connect(&metadataReceiver_, &MetadataReceiver::errorMessage, this, &MainWindow::onError);
@@ -396,6 +401,12 @@ void MainWindow::onMetadata(int device, qint64 freqHz, bool squelchOpen, QString
         appendSquelchLogEntry(squelchStart_, squelchFreqHz_, squelchLabel_, durationMs);
         squelchOpen_ = false;
     }
+}
+
+void MainWindow::onDecodedMessage(int device, qint64 freqHz, QString label, QString modulation, QString msgType, bool crcOk, int mmsi, QString payload, quint32 seq) {
+    Q_UNUSED(device);
+    Q_UNUSED(seq);
+    appendDecodedLogEntry(QDateTime::currentDateTime(), freqHz, label, modulation, msgType, crcOk, mmsi, payload);
 }
 
 void MainWindow::onError(QString message) {
@@ -841,6 +852,82 @@ void MainWindow::appendSquelchLogEntry(QDateTime const& start, qint64 freqHz, QS
     squelchLog_->appendPlainText(QString("%1 %2 %3 %4").arg(stamp).arg(mhz, 0, 'f', 3).arg(shownLabel).arg(duration));
 }
 
+void MainWindow::appendDecodedLogEntry(QDateTime const& when,
+                                       qint64 freqHz,
+                                       QString const& label,
+                                       QString const& modulation,
+                                       QString const& msgType,
+                                       bool crcOk,
+                                       int mmsi,
+                                       QString const& payload) {
+    double mhz = static_cast<double>(freqHz) / 1000000.0;
+    QString stamp = when.toString("yyyy-MM-dd HH:mm:ss");
+    QString shownLabel = label.isEmpty() ? "-" : label;
+    QString mod = modulation.trimmed().toUpper();
+    QString type = msgType.trimmed();
+    QString mmsiText = (mmsi >= 0) ? QString::number(mmsi) : "-";
+    QString crcText = crcOk ? "ok" : "bad";
+    QString summary = summarizeDecodedPayload(modulation, payload);
+    squelchLog_->appendPlainText(
+        QString("%1 %2 %3 DECODED %4 %5 mmsi=%6 crc=%7 %8").arg(stamp).arg(mhz, 0, 'f', 3).arg(shownLabel).arg(mod).arg(type).arg(mmsiText).arg(crcText).arg(summary));
+}
+
+QString MainWindow::summarizeDecodedPayload(QString const& modulation, QString const& payload) const {
+    QJsonParseError error;
+    QJsonDocument doc = QJsonDocument::fromJson(payload.toUtf8(), &error);
+    if (error.error != QJsonParseError::NoError || !doc.isObject()) {
+        return payload.left(220);
+    }
+
+    QJsonObject obj = doc.object();
+    QString mod = modulation.trimmed().toLower();
+    if (mod == "ais") {
+        QStringList parts;
+        parts << QString("type=%1").arg(obj.value("type").toInt(-1));
+        if (obj.contains("sog_kn") && !obj.value("sog_kn").isNull()) {
+            parts << QString("sog=%1kn").arg(obj.value("sog_kn").toDouble(), 0, 'f', 1);
+        }
+        if (obj.contains("cog_deg") && !obj.value("cog_deg").isNull()) {
+            parts << QString("cog=%1").arg(obj.value("cog_deg").toDouble(), 0, 'f', 1);
+        }
+        if (obj.contains("lat") && obj.contains("lon") && !obj.value("lat").isNull() && !obj.value("lon").isNull()) {
+            parts << QString("pos=%1,%2").arg(obj.value("lat").toDouble(), 0, 'f', 5).arg(obj.value("lon").toDouble(), 0, 'f', 5);
+        }
+        QString shipname = obj.value("shipname").toString().trimmed();
+        if (!shipname.isEmpty()) {
+            parts << QString("ship=%1").arg(shipname);
+        }
+        return parts.join(" ");
+    }
+
+    if (mod == "dsc") {
+        QStringList parts;
+        QString format = obj.value("format").toString();
+        QString category = obj.value("category").toString();
+        QString tele1 = obj.value("telecommand1").toString();
+        QString address = obj.value("address").toString();
+        if (!format.isEmpty()) {
+            parts << QString("format=%1").arg(format);
+        }
+        if (!category.isEmpty()) {
+            parts << QString("cat=%1").arg(category);
+        }
+        if (!tele1.isEmpty()) {
+            parts << QString("tc1=%1").arg(tele1);
+        }
+        if (!address.isEmpty()) {
+            parts << QString("addr=%1").arg(address);
+        }
+        QString distress = obj.value("distress_nature").toString();
+        if (!distress.isEmpty() && distress != "none") {
+            parts << QString("distress=%1").arg(distress);
+        }
+        return parts.join(" ");
+    }
+
+    return payload.left(220);
+}
+
 void MainWindow::appendChannelWaterfallFrame(qint64 freqHz, QVector<float> const& bins) {
     QList<QVector<float>>& frames = channelWaterfallByFreq_[freqHz];
     frames.append(bins);
@@ -1105,7 +1192,7 @@ bool MainWindow::parseSemicolonChannels(QString const& content,
             return false;
         }
 
-        if (modulation != "am" && modulation != "nfm") {
+        if (modulation != "am" && modulation != "nfm" && modulation != "ais" && modulation != "dsc") {
             if (errorMessage) {
                 *errorMessage = QString("Line %1 has an unsupported modulation: %2").arg(i + 1).arg(modulation);
             }

@@ -19,6 +19,7 @@ class MetadataReceiver : public QObject {
    signals:
     void channelsReceived(QList<qint64> freqsHz, QStringList labels);
     void metadataReceived(int device, qint64 freqHz, bool squelchOpen, QString label, quint32 seq);
+    void decodedMessageReceived(int device, qint64 freqHz, QString label, QString modulation, QString msgType, bool crcOk, int mmsi, QString payload, quint32 seq);
     void errorMessage(QString message);
 
    private slots:

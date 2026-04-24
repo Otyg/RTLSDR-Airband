@@ -128,6 +128,35 @@ void scan_meta_udp_write(scan_meta_udp_data* sdata, int device_idx, int freq_hz,
     sendto(sdata->send_socket, msg.data(), msg.size(), MSG_DONTWAIT | MSG_NOSIGNAL, &sdata->dest_sockaddr, sdata->dest_sockaddr_len);
 }
 
+void scan_meta_udp_write_decoded(scan_meta_udp_data* sdata, int device_idx, int freq_hz, char const* label, char const* modulation, char const* msg_type,
+                                 char const* payload, bool crc_ok, int mmsi) {
+    if (sdata->send_socket == -1) {
+        return;
+    }
+
+    std::string msg = "{\"v\":1,\"seq\":";
+    msg += std::to_string(sdata->seq++);
+    msg += ",\"event\":\"decoded\",\"device\":";
+    msg += std::to_string(device_idx);
+    msg += ",\"freq_hz\":";
+    msg += std::to_string(freq_hz);
+    msg += ",\"label\":\"";
+    append_json_escaped_string(&msg, label);
+    msg += "\",\"modulation\":\"";
+    append_json_escaped_string(&msg, modulation);
+    msg += "\",\"msg_type\":\"";
+    append_json_escaped_string(&msg, msg_type);
+    msg += "\",\"crc_ok\":";
+    msg += (crc_ok ? "true" : "false");
+    msg += ",\"mmsi\":";
+    msg += std::to_string(mmsi);
+    msg += ",\"payload\":\"";
+    append_json_escaped_string(&msg, payload);
+    msg += "\"}\n";
+
+    sendto(sdata->send_socket, msg.data(), msg.size(), MSG_DONTWAIT | MSG_NOSIGNAL, &sdata->dest_sockaddr, sdata->dest_sockaddr_len);
+}
+
 void scan_meta_udp_shutdown(scan_meta_udp_data* sdata) {
     if (sdata->send_socket != -1) {
         close(sdata->send_socket);

@@ -606,6 +606,10 @@ static int parse_channels(libconfig::Setting& chans, device_t* dev, int i) {
 #ifdef NFM
             if (strncmp(chans[j]["modulation"], "nfm", 3) == 0) {
                 channel_modulation = MOD_NFM;
+            } else if (strncmp(chans[j]["modulation"], "ais", 3) == 0) {
+                channel_modulation = MOD_AIS;
+            } else if (strncmp(chans[j]["modulation"], "dsc", 3) == 0) {
+                channel_modulation = MOD_DSC;
             } else
 #endif /* NFM */
                 if (strncmp(chans[j]["modulation"], "am", 2) != 0) {
@@ -676,6 +680,10 @@ static int parse_channels(libconfig::Setting& chans, device_t* dev, int i) {
 #ifdef NFM
                     if (strncmp(chans[j]["modulations"][f], "nfm", 3) == 0) {
                         channel->freqlist[f].modulation = MOD_NFM;
+                    } else if (strncmp(chans[j]["modulations"][f], "ais", 3) == 0) {
+                        channel->freqlist[f].modulation = MOD_AIS;
+                    } else if (strncmp(chans[j]["modulations"][f], "dsc", 3) == 0) {
+                        channel->freqlist[f].modulation = MOD_DSC;
                     } else
 #endif /* NFM */
                         if (strncmp(chans[j]["modulations"][f], "am", 2) == 0) {
@@ -933,7 +941,7 @@ static int parse_channels(libconfig::Setting& chans, device_t* dev, int i) {
 
 #ifdef NFM
         for (int f = 0; f < channel->freq_count; f++) {
-            if (channel->freqlist[f].modulation == MOD_NFM) {
+            if (channel->freqlist[f].modulation == MOD_NFM || channel->freqlist[f].modulation == MOD_AIS || channel->freqlist[f].modulation == MOD_DSC) {
                 channel->needs_raw_iq = 1;
                 break;
             }

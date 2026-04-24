@@ -4,6 +4,7 @@
 #include <QByteArray>
 #include <QDateTime>
 #include <QHash>
+#include <QJsonObject>
 #include <QList>
 #include <QMainWindow>
 #include <QPointer>
@@ -50,6 +51,7 @@ class MainWindow : public QMainWindow {
     void stopListening();
     void onChannelsReceived(QList<qint64> freqsHz, QStringList labels);
     void onMetadata(int device, qint64 freqHz, bool squelchOpen, QString label, quint32 seq);
+    void onDecodedMessage(int device, qint64 freqHz, QString label, QString modulation, QString msgType, bool crcOk, int mmsi, QString payload, quint32 seq);
     void onError(QString message);
     void onAudioChunk(QByteArray pcmData);
     void onMp3PlaybackStarted();
@@ -78,6 +80,15 @@ class MainWindow : public QMainWindow {
     void recordSquelchDuration(qint64 freqHz, qint64 durationMs);
     void flushOpenSquelchIfAny();
     void appendSquelchLogEntry(QDateTime const& start, qint64 freqHz, QString const& label, qint64 durationMs);
+    void appendDecodedLogEntry(QDateTime const& when,
+                               qint64 freqHz,
+                               QString const& label,
+                               QString const& modulation,
+                               QString const& msgType,
+                               bool crcOk,
+                               int mmsi,
+                               QString const& payload);
+    QString summarizeDecodedPayload(QString const& modulation, QString const& payload) const;
     QVector<float> downsampleForWaveform(QByteArray const& data) const;
     QVector<float> computeWaterfallBins(QByteArray const& data) const;
     void appendChannelWaterfallFrame(qint64 freqHz, QVector<float> const& bins);

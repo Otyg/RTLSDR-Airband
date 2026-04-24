@@ -63,6 +63,22 @@ void MetadataReceiver::onReadyRead() {
             emit channelsReceived(freqsHz, labels);
             continue;
         }
+
+        QString eventType = obj.value("event").toString();
+        if (eventType == "decoded") {
+            int device = obj.value("device").toInt(-1);
+            qint64 freqHz = static_cast<qint64>(obj.value("freq_hz").toDouble(0));
+            QString label = obj.value("label").toString();
+            QString modulation = obj.value("modulation").toString();
+            QString decodedType = obj.value("msg_type").toString();
+            bool crcOk = obj.value("crc_ok").toBool(false);
+            int mmsi = obj.value("mmsi").toInt(-1);
+            QString payload = obj.value("payload").toString();
+            quint32 seq = static_cast<quint32>(obj.value("seq").toInt(0));
+            emit decodedMessageReceived(device, freqHz, label, modulation, decodedType, crcOk, mmsi, payload, seq);
+            continue;
+        }
+
         int device = obj.value("device").toInt(-1);
         qint64 freqHz = static_cast<qint64>(obj.value("freq_hz").toDouble(0));
         bool squelchOpen = obj.value("squelch_open").toBool(false);
