@@ -317,53 +317,103 @@ static std::string ais_decoded_payload_json(uint8_t const* bytes, int payload_le
     return os.str();
 }
 
+static int ais_pack_bytes(uint8_t const* bits, int bit_len, int bit_offset, bool invert_bits, uint8_t* out_bytes, int out_capacity) {
+    if (bit_len <= bit_offset) {
+        return 0;
+    }
+    int const usable_bits = bit_len - bit_offset;
+    int const byte_count = usable_bits / 8;
+    if (byte_count < 5 || byte_count > out_capacity) {
+        return 0;
+    }
+
+    memset(out_bytes, 0, (size_t)out_capacity);
+    for (int i = 0; i < byte_count; ++i) {
+        uint8_t v = 0;
+        for (int bit = 0; bit < 8; ++bit) {
+            int const idx = bit_offset + i * 8 + bit;
+            uint8_t b = bits[idx] & 0x1;
+            if (invert_bits) {
+                b ^= 0x1;
+            }
+            v |= (uint8_t)(b << bit);
+        }
+        out_bytes[i] = v;
+    }
+    return byte_count;
+}
+
+static bool ais_build_message_from_bytes(uint8_t const* bytes, int byte_count, bool require_crc_ok, DecodedMessage* out_msg) {
+    if (byte_count < 5) {
+        return false;
+    }
+    int const payload_len = byte_count - 2;
+    if (payload_len < 5) {
+        return false;
+    }
+
+    uint16_t const rx_fcs = (uint16_t)bytes[payload_len] | ((uint16_t)bytes[payload_len + 1] << 8);
+    uint16_t const calc_fcs = crc16_x25(bytes, (size_t)payload_len);
+    bool const crc_ok = (rx_fcs == calc_fcs);
+    if (require_crc_ok && !crc_ok) {
+        return false;
+    }
+
+    int const ais_type = (int)get_bits_be(bytes, 0, 6);
+    if (ais_type < 1 || ais_type > 27) {
+        return false;
+    }
+    int const mmsi = (int)get_bits_be(bytes, 8, 30);
+
+    out_msg->modulation = "ais";
+    out_msg->msg_type = "ais_frame";
+    out_msg->payload = ais_decoded_payload_json(bytes, payload_len, ais_type, mmsi);
+    out_msg->crc_ok = crc_ok;
+    out_msg->mmsi = mmsi;
+    return true;
+}
+
 static void try_decode_ais_frame(freq_t* fparms, std::vector<DecodedMessage>* out) {
     if (fparms->ais_debit_len < 40) {
         return;
     }
 
-    int const byte_count = fparms->ais_debit_len / 8;
-    if (byte_count < 5 || byte_count > 256) {
+    int const nominal_byte_count = fparms->ais_debit_len / 8;
+    if (nominal_byte_count < 5 || nominal_byte_count > 256) {
         return;
     }
 
     uint8_t bytes[256];
-    memset(bytes, 0, sizeof(bytes));
-
-    for (int i = 0; i < byte_count; ++i) {
-        uint8_t v = 0;
-        for (int bit = 0; bit < 8; ++bit) {
-            int idx = i * 8 + bit;
-            if (idx >= fparms->ais_debit_len) {
-                break;
-            }
-            v |= (uint8_t)(fparms->ais_debit_buf[idx] & 0x1) << bit;
-        }
-        bytes[i] = v;
-    }
-
-    int const payload_len = byte_count - 2;
-    uint16_t const rx_fcs = (uint16_t)bytes[payload_len] | ((uint16_t)bytes[payload_len + 1] << 8);
-    uint16_t const calc_fcs = crc16_x25(bytes, (size_t)payload_len);
-    bool const crc_ok = (rx_fcs == calc_fcs);
-
-    if (payload_len < 5) {
-        return;
-    }
-
-    int const ais_type = (int)get_bits_be(bytes, 0, 6);
-    if (ais_type < 1 || ais_type > 27) {
-        return;
-    }
-    int const mmsi = (int)get_bits_be(bytes, 8, 30);
-
     DecodedMessage msg;
-    msg.modulation = "ais";
-    msg.msg_type = "ais_frame";
-    msg.payload = ais_decoded_payload_json(bytes, payload_len, ais_type, mmsi);
-    msg.crc_ok = crc_ok;
-    msg.mmsi = mmsi;
-    out->push_back(msg);
+
+    // First try nominal framing.
+    int const byte_count = ais_pack_bytes(fparms->ais_debit_buf, fparms->ais_debit_len, 0, false, bytes, (int)sizeof(bytes));
+    if (byte_count > 0 && ais_build_message_from_bytes(bytes, byte_count, true, &msg)) {
+        out->push_back(msg);
+        return;
+    }
+
+    // Recovery pass: try alternate bit alignments and inverted bit polarity.
+    for (int bit_offset = 0; bit_offset < 8; ++bit_offset) {
+        for (int invert = 0; invert < 2; ++invert) {
+            if (bit_offset == 0 && invert == 0) {
+                continue;
+            }
+            int const recovered_bytes = ais_pack_bytes(fparms->ais_debit_buf, fparms->ais_debit_len, bit_offset, invert != 0, bytes, (int)sizeof(bytes));
+            if (recovered_bytes <= 0) {
+                continue;
+            }
+            if (ais_build_message_from_bytes(bytes, recovered_bytes, true, &msg)) {
+                out->push_back(msg);
+                return;
+            }
+        }
+    }
+
+    // Debug fallback: emit best-effort decode even when CRC fails.
+    if (byte_count > 0 && ais_build_message_from_bytes(bytes, byte_count, false, &msg)) {
+        out->push_back(msg);
+    }
 }
 
 static void ais_decode_batch(freq_t* fparms, float const* samples, size_t sample_count, std::vector<DecodedMessage>* out) {
